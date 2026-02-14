@@ -27,7 +27,7 @@ else:
 conn = sqlite3.connect(DB_PATH)
 cursor = conn.cursor()
 
-# Обновленная таблица конфигураций
+# Создание таблиц
 cursor.execute('''CREATE TABLE IF NOT EXISTS configs (
     guild_id INTEGER PRIMARY KEY,
     verify_role_id INTEGER,
@@ -51,6 +51,20 @@ cursor.execute('''CREATE TABLE IF NOT EXISTS voice_channels (
     owner_id INTEGER
 )''')
 conn.commit()
+
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ БД ---
+def get_config(guild_id):
+    cursor.execute("SELECT * FROM configs WHERE guild_id = ?", (guild_id,))
+    return cursor.fetchone()
+
+def update_config(guild_id, column, value):
+    cursor.execute("SELECT guild_id FROM configs WHERE guild_id = ?", (guild_id,))
+    if cursor.fetchone() is None:
+        cursor.execute("INSERT INTO configs (guild_id) VALUES (?)", (guild_id,))
+    
+    query = f"UPDATE configs SET {column} = ? WHERE guild_id = ?"
+    cursor.execute(query, (value, guild_id))
+    conn.commit()
 
 # --- МУЗЫКАЛЬНЫЕ НАСТРОЙКИ ---
 yt_dlp.utils.bug_reports_message = lambda: ''
@@ -85,22 +99,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
         filename = data['url'] if stream else ytdl.prepare_filename(data)
         return cls(discord.FFmpegPCMAudio(filename, **ffmpeg_options), data=data)
 
-# --- ФУНКЦИИ БАЗЫ ДАННЫХ ---
-def get_config(guild_id):
-    cursor.execute("SELECT * FROM configs WHERE guild_id = ?", (guild_id,))
-    return cursor.fetchone()
-
-def update_config(guild_id, column, value):
-    # Проверяем, существует ли запись
-    cursor.execute("SELECT guild_id FROM configs WHERE guild_id = ?", (guild_id,))
-    if cursor.fetchone() is None:
-        cursor.execute("INSERT INTO configs (guild_id) VALUES (?)", (guild_id,))
-    
-    query = f"UPDATE configs SET {column} = ? WHERE guild_id = ?"
-    cursor.execute(query, (value, guild_id))
-    conn.commit()
-
-# --- 1. ВЕРИФИКАЦИЯ ---
+# --- 1. ВЕРИФИКАЦИЯ (ИСПРАВЛЕННАЯ) ---
 
 class VerifyModal(discord.ui.Modal, title='Верификация'):
     code_input = discord.ui.TextInput(label='Введите код ниже', style=discord.TextStyle.short)
@@ -115,22 +114,40 @@ class VerifyModal(discord.ui.Modal, title='Верификация'):
         if self.code_input.value == self.generated_code:
             role = interaction.guild.get_role(self.role_id)
             if role:
-                await interaction.user.add_roles(role)
-                await interaction.response.send_message(f"✅ Вы успешно верифицированы! Доступ открыт.", ephemeral=True)
+                try:
+                    await interaction.user.add_roles(role)
+                    await interaction.response.send_message(f"✅ Вы успешно верифицированы! Доступ открыт.", ephemeral=True)
+                except discord.Forbidden:
+                    await interaction.response.send_message("❌ Ошибка прав! Роль бота должна быть ВЫШЕ роли верификации в настройках сервера.", ephemeral=True)
             else:
-                await interaction.response.send_message("❌ Ошибка: Роль верификации удалена с сервера.", ephemeral=True)
+                await interaction.response.send_message("❌ Ошибка: Роль верификации не найдена.", ephemeral=True)
         else:
             await interaction.response.send_message("❌ Неверный код. Попробуйте снова.", ephemeral=True)
 
 class VerifyView(discord.ui.View):
-    def __init__(self, role_id):
-        super().__init__(timeout=None)
-        self.role_id = role_id
+    def __init__(self):
+        super().__init__(timeout=None) # Делаем кнопку вечной
 
-    @discord.ui.button(label="Пройти верификацию", style=discord.ButtonStyle.green, custom_id="verify_btn", emoji="✅")
+    @discord.ui.button(label="Пройти верификацию", style=discord.ButtonStyle.green, custom_id="verify_persistent_btn", emoji="✅")
     async def verify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Получаем роль из базы данных ПРИ НАЖАТИИ (чтобы не терять связь при перезагрузке)
+        cursor.execute("SELECT verify_role_id FROM configs WHERE guild_id = ?", (interaction.guild.id,))
+        res = cursor.fetchone()
+        
+        if not res or not res[0]:
+            return await interaction.response.send_message("❌ Верификация не настроена в админ-панели.", ephemeral=True)
+
+        role_id = res[0]
+        role = interaction.guild.get_role(role_id)
+        
+        if not role:
+            return await interaction.response.send_message("❌ Роль верификации удалена. Настройте заново.", ephemeral=True)
+
+        if role in interaction.user.roles:
+            return await interaction.response.send_message("✅ Вы уже верифицированы.", ephemeral=True)
+
         code = str(random.randint(1000, 9999))
-        await interaction.response.send_modal(VerifyModal(code, self.role_id))
+        await interaction.response.send_modal(VerifyModal(code, role_id))
 
 # --- 2. ТИКЕТЫ ---
 
@@ -141,7 +158,6 @@ class TicketControlView(discord.ui.View):
     @discord.ui.button(label="🔒 Закрыть тикет", style=discord.ButtonStyle.red, custom_id="close_ticket")
     async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         conf = get_config(interaction.guild.id)
-        # conf[2] - support_role_id, conf[4] - ticket_log_channel_id
         support_role_id = conf[2] if conf else None
         log_channel_id = conf[4] if conf else None
 
@@ -157,11 +173,9 @@ class TicketControlView(discord.ui.View):
         if not ticket_data:
             return await interaction.response.send_message("Это не канал тикета.", ephemeral=True)
 
-        # Проверка прав: Владелец тикета ИЛИ Поддержка ИЛИ Админ
         if interaction.user.id == ticket_data[0] or has_role or interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("Тикет будет закрыт и удален через 5 секунд...")
             
-            # Логирование
             if log_channel_id:
                 log_channel = interaction.guild.get_channel(log_channel_id)
                 if log_channel:
@@ -189,9 +203,8 @@ class TicketStartView(discord.ui.View):
     @discord.ui.button(label="📩 Создать тикет", style=discord.ButtonStyle.blurple, custom_id="create_ticket_btn")
     async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         conf = get_config(interaction.guild.id)
-        # conf[3] = category_id, conf[2] = support_role_id
         if not conf or not conf[3]:
-            return await interaction.response.send_message("❌ Система тикетов не настроена (нет категории)!", ephemeral=True)
+            return await interaction.response.send_message("❌ Система тикетов не настроена!", ephemeral=True)
         
         category = interaction.guild.get_channel(conf[3])
         support_role = interaction.guild.get_role(conf[2]) if conf[2] else None
@@ -199,14 +212,12 @@ class TicketStartView(discord.ui.View):
         cursor.execute("SELECT COUNT(*) FROM tickets")
         count = cursor.fetchone()[0] + 1
         
-        # Права доступа
         overwrites = {
-            interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False), # Никто не видит
-            interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True), # Создатель видит
-            interaction.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True) # Бот видит
+            interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+            interaction.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
         }
         if support_role:
-            # Поддержка видит
             overwrites[support_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
 
         channel = await interaction.guild.create_text_channel(
@@ -219,7 +230,7 @@ class TicketStartView(discord.ui.View):
                        (channel.id, interaction.user.id, 'open', datetime.datetime.now()))
         conn.commit()
 
-        embed = discord.Embed(title=f"Тикет #{count}", description=f"Привет, {interaction.user.mention}!\nОпишите вашу проблему. Поддержка скоро ответит.\n\nНажмите кнопку ниже, чтобы закрыть тикет.", color=discord.Color.blue())
+        embed = discord.Embed(title=f"Тикет #{count}", description=f"Привет, {interaction.user.mention}!\nОпишите вашу проблему. Поддержка скоро ответит.", color=discord.Color.blue())
         await channel.send(f"{interaction.user.mention}", embed=embed, view=TicketControlView())
         
         if support_role:
@@ -227,93 +238,81 @@ class TicketStartView(discord.ui.View):
             
         await interaction.response.send_message(f"✅ Тикет создан: {channel.mention}", ephemeral=True)
 
-# --- 3. АДМИН ПАНЕЛЬ (НОВАЯ) ---
+# --- 3. АДМИН ПАНЕЛЬ ---
 
-# Модалка для ввода ссылки на YouTube
 class YouTubeURLModal(discord.ui.Modal, title='Настройка YouTube'):
     url = discord.ui.TextInput(label='Ссылка на канал YouTube', placeholder='https://youtube.com/@username')
 
     async def on_submit(self, interaction: discord.Interaction):
         url = self.url.value
-        # Пытаемся получить ID канала через yt-dlp, чтобы было надежно
         try:
-            # Это может занять пару секунд
             await interaction.response.defer(ephemeral=True) 
             info = await asyncio.to_thread(lambda: ytdl.extract_info(url, download=False))
             channel_id = info.get('channel_id')
             if not channel_id:
-                return await interaction.followup.send("❌ Не удалось найти ID канала. Попробуйте другую ссылку.")
+                return await interaction.followup.send("❌ Не удалось найти ID канала.")
             
             rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
             update_config(interaction.guild.id, "youtube_channel_url", rss_url)
-            await interaction.followup.send(f"✅ YouTube канал подключен!\nКанал: {info.get('uploader')}\nRSS: {rss_url}")
+            await interaction.followup.send(f"✅ YouTube канал подключен!\nКанал: {info.get('uploader')}")
         except Exception as e:
             await interaction.followup.send(f"❌ Ошибка: {e}")
 
-# Селекторы для админки
 class AdminSelect(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    # 1. Выбор роли поддержки
     @discord.ui.select(cls=discord.ui.RoleSelect, placeholder="Выберите роль Поддержки (Тикеты)", min_values=1, max_values=1, row=0)
     async def select_support_role(self, interaction: discord.Interaction, select: discord.ui.RoleSelect):
-        role_id = select.values[0].id
-        update_config(interaction.guild.id, "support_role_id", role_id)
-        await interaction.response.send_message(f"✅ Роль поддержки установлена: {select.values[0].mention}", ephemeral=True)
+        update_config(interaction.guild.id, "support_role_id", select.values[0].id)
+        await interaction.response.send_message(f"✅ Роль поддержки: {select.values[0].mention}", ephemeral=True)
 
-    # 2. Выбор канала логов тикетов
     @discord.ui.select(cls=discord.ui.ChannelSelect, placeholder="Выберите канал для логов Тикетов", channel_types=[discord.ChannelType.text], row=1)
     async def select_log_channel(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
         update_config(interaction.guild.id, "ticket_log_channel_id", select.values[0].id)
-        await interaction.response.send_message(f"✅ Логи тикетов будут здесь: {select.values[0].mention}", ephemeral=True)
+        await interaction.response.send_message(f"✅ Логи тикетов: {select.values[0].mention}", ephemeral=True)
 
-    # 3. Выбор канала для музыки
     @discord.ui.select(cls=discord.ui.ChannelSelect, placeholder="Выберите канал для команд Музыки", channel_types=[discord.ChannelType.text], row=2)
     async def select_music_channel(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
         update_config(interaction.guild.id, "music_channel_id", select.values[0].id)
-        await interaction.response.send_message(f"✅ Музыку можно заказывать только в: {select.values[0].mention}", ephemeral=True)
+        await interaction.response.send_message(f"✅ Канал музыки: {select.values[0].mention}", ephemeral=True)
     
-    # 4. Выбор канала для уведомлений YouTube
     @discord.ui.select(cls=discord.ui.ChannelSelect, placeholder="Выберите канал для постов YouTube", channel_types=[discord.ChannelType.text], row=3)
     async def select_yt_channel(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
         update_config(interaction.guild.id, "notification_channel_id", select.values[0].id)
-        await interaction.response.send_message(f"✅ Новые видео будут публиковаться в: {select.values[0].mention}", ephemeral=True)
+        await interaction.response.send_message(f"✅ Канал уведомлений: {select.values[0].mention}", ephemeral=True)
 
-    # КНОПКИ ДЕЙСТВИЙ
     @discord.ui.button(label="🔗 Ввести ссылку YouTube", style=discord.ButtonStyle.blurple, row=4)
     async def set_yt_url(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(YouTubeURLModal())
 
-    @discord.ui.button(label="🛠 Создать Верификацию (Изоляция)", style=discord.ButtonStyle.green, row=4)
+    @discord.ui.button(label="🛠 Создать Верификацию", style=discord.ButtonStyle.green, row=4)
     async def auto_verify(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild = interaction.guild
-        await interaction.response.send_message("⚙️ Начинаю настройку изоляции...", ephemeral=True)
+        await interaction.response.send_message("⚙️ Настраиваю...", ephemeral=True)
         
-        # 1. Скрываем всё для @everyone
         default_role = guild.default_role
         try:
-            # ВАЖНО: Это скрывает ВСЕ каналы для тех, у кого нет ролей.
             await default_role.edit(permissions=discord.Permissions(read_messages=False, view_channels=False))
         except:
-            await interaction.followup.send("⚠️ Не удалось изменить права @everyone. Сделайте это вручную (отключите 'View Channels').", ephemeral=True)
+            await interaction.followup.send("⚠️ Не удалось скрыть каналы для @everyone. Сделайте это вручную.", ephemeral=True)
 
-        # 2. Создаем роль Верифнутый
         verified_role = await guild.create_role(name="Verified", permissions=discord.Permissions(read_messages=True, view_channels=True, send_messages=True, connect=True, speak=True), color=discord.Color.green())
         update_config(guild.id, "verify_role_id", verified_role.id)
 
-        # 3. Создаем канал верификации
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channels=True, read_messages=True, send_messages=False),
-            verified_role: discord.PermissionOverwrite(view_channels=False), # Верифнутые его не видят (опционально)
+            verified_role: discord.PermissionOverwrite(view_channels=False),
             guild.me: discord.PermissionOverwrite(view_channels=True)
         }
         verify_channel = await guild.create_text_channel("verify", overwrites=overwrites)
         
-        embed = discord.Embed(title="🛡 Верификация", description="Чтобы получить доступ к серверу, нажмите кнопку ниже и введите код с картинки.", color=discord.Color.gold())
-        await verify_channel.send(embed=embed, view=VerifyView(verified_role.id))
+        embed = discord.Embed(title="🛡 Верификация", description="Нажмите кнопку, чтобы получить доступ.", color=discord.Color.gold())
         
-        await interaction.followup.send(f"✅ Готово! Канал: {verify_channel.mention}. Роль: {verified_role.mention}. \n**Внимание:** Теперь новые пользователи не видят ничего, кроме верификации.")
+        # ВАЖНО: Используем класс без ID, он возьмет его из базы
+        await verify_channel.send(embed=embed, view=VerifyView())
+        
+        await interaction.followup.send(f"✅ Готово! Роль: {verified_role.mention}. Не забудьте поднять роль бота ВЫШЕ роли Verified!")
 
     @discord.ui.button(label="🎫 Создать систему Тикетов", style=discord.ButtonStyle.gray, row=4)
     async def auto_tickets(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -325,16 +324,13 @@ class AdminSelect(discord.ui.View):
         embed = discord.Embed(title="Поддержка", description="Нажмите кнопку ниже, чтобы создать тикет.", color=discord.Color.blue())
         await ticket_channel.send(embed=embed, view=TicketStartView())
         
-        await interaction.response.send_message(f"✅ Система тикетов создана в категории {cat.name}", ephemeral=True)
+        await interaction.response.send_message(f"✅ Тикеты созданы в категории {cat.name}", ephemeral=True)
 
-
-# --- 4. МУЗЫКА (С ПРОВЕРКОЙ КАНАЛА) ---
+# --- МУЗЫКА И КОМАНДЫ ---
 
 @bot.command()
 async def play(ctx, *, url):
-    # Проверка канала
     conf = get_config(ctx.guild.id)
-    # conf[5] is music_channel_id
     if conf and conf[5]:
         if ctx.channel.id != conf[5]:
              music_channel = ctx.guild.get_channel(conf[5])
@@ -357,7 +353,8 @@ async def play(ctx, *, url):
             ctx.voice_client.play(player, after=lambda e: print(f'Player error: {e}') if e else None)
             await ctx.send(f'🎶 Играет: **{player.title}**')
         except Exception as e:
-            await ctx.send(f"Ошибка воспроизведения: {e}")
+            await ctx.send(f"⚠️ Ошибка воспроизведения. Попробуйте другую ссылку.")
+            print(f"Music Error: {e}")
 
 @bot.command()
 async def stop(ctx):
@@ -365,11 +362,10 @@ async def stop(ctx):
         await ctx.voice_client.disconnect()
         await ctx.send("Музыка остановлена.")
 
-# --- 5. ФОНОВЫЕ ЗАДАЧИ (YOUTUBE + TICKETS) ---
+# --- ЗАДАЧИ И СОБЫТИЯ ---
 
 @tasks.loop(minutes=5)
 async def check_updates():
-    # 1. YouTube
     cursor.execute("SELECT guild_id, youtube_channel_url, youtube_last_video_id, notification_channel_id FROM configs")
     configs = cursor.fetchall()
     
@@ -384,22 +380,20 @@ async def check_updates():
                 video_id = latest.yt_videoid
                 
                 if video_id != last_id:
-                    # Новое видео!
                     channel = bot.get_channel(notif_channel_id)
                     if channel:
                         await channel.send(f"🚨 **Новое видео!**\n{latest.title}\n{latest.link}")
                         update_config(guild_id, "youtube_last_video_id", video_id)
         except Exception as e:
-            print(f"Error checking YT for {guild_id}: {e}")
+            print(f"Error checking YT: {e}")
 
-    # 2. Очистка старых тикетов
     cursor.execute("SELECT channel_id, timestamp FROM tickets")
     tickets = cursor.fetchall()
     now = datetime.datetime.now()
     for ticket in tickets:
         try:
             t_time = datetime.datetime.strptime(ticket[1], '%Y-%m-%d %H:%M:%S.%f')
-            if (now - t_time).total_seconds() > 172800: # 48 часов
+            if (now - t_time).total_seconds() > 172800:
                 channel = bot.get_channel(ticket[0])
                 if channel:
                     await channel.send("⚠️ Тикет автоматически закрыт из-за неактивности.")
@@ -410,12 +404,9 @@ async def check_updates():
             continue
     conn.commit()
 
-# --- СОБЫТИЯ ---
-
 @bot.event
 async def on_voice_state_update(member, before, after):
-    # Приватные войсы
-    if after.channel and "Создать войс" in after.channel.name: # Ищет по части названия
+    if after.channel and "Создать войс" in after.channel.name:
         guild = member.guild
         category = after.channel.category
         overwrites = {
@@ -439,12 +430,9 @@ async def on_voice_state_update(member, before, after):
 async def on_ready():
     print(f'Бот запущен: {bot.user}')
     check_updates.start()
-    # Восстановление кнопок
-    cursor.execute("SELECT verify_role_id FROM configs")
-    res = cursor.fetchall()
-    for row in res:
-        if row[0]: bot.add_view(VerifyView(row[0]))
     
+    # --- РЕГИСТРАЦИЯ КНОПОК ДЛЯ ПЕРСИСТЕНТНОСТИ ---
+    bot.add_view(VerifyView())  # Самое важное! Без аргументов.
     bot.add_view(TicketStartView())
     bot.add_view(TicketControlView())
     bot.add_view(AdminSelect())
@@ -452,10 +440,7 @@ async def on_ready():
 @bot.command()
 async def admin(ctx):
     if ctx.author.name in ADMINS or ctx.author.guild_permissions.administrator:
-        embed = discord.Embed(title="⚙️ Панель Администратора", description="Используйте меню ниже для настройки бота.", color=discord.Color.dark_grey())
-        embed.add_field(name="Инструкция", value="1. Выберите роль поддержки.\n2. Выберите каналы для логов и музыки.\n3. Нажмите кнопку создания верификации или тикетов.")
+        embed = discord.Embed(title="⚙️ Панель Администратора", description="Настройка бота.", color=discord.Color.dark_grey())
         await ctx.send(embed=embed, view=AdminSelect())
-    else:
-        await ctx.send("У вас нет прав.")
 
 bot.run(TOKEN)
