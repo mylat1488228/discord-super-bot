@@ -9,6 +9,7 @@ import datetime
 import feedparser
 import re
 import os
+import traceback
 
 # --- КОНФИГУРАЦИЯ ---
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -122,7 +123,7 @@ class VerifyModal(discord.ui.Modal, title='Верификация'):
                     await interaction.user.add_roles(role)
                     await interaction.response.send_message(f"✅ Доступ открыт!", ephemeral=True)
                 except:
-                    await interaction.response.send_message("❌ Ошибка прав! Поднимите роль бота ВЫШЕ роли Verified.", ephemeral=True)
+                    await interaction.response.send_message("❌ Ошибка прав! Роль бота должна быть ВЫШЕ роли Verified.", ephemeral=True)
             else:
                 await interaction.response.send_message("❌ Роль не найдена.", ephemeral=True)
         else:
@@ -190,7 +191,7 @@ class TicketStartView(discord.ui.View):
         await ch.send(f"{interaction.user.mention}", embed=discord.Embed(title=f"Тикет #{count}", description="Опишите проблему.", color=discord.Color.blue()), view=TicketControlView())
         await interaction.response.send_message(f"✅ Создано: {ch.mention}", ephemeral=True)
 
-# --- 3. АДМИН ПАНЕЛЬ ---
+# --- 3. АДМИН ПАНЕЛЬ (БЕЗОПАСНАЯ) ---
 class YouTubeURLModal(discord.ui.Modal, title='YouTube'):
     url = discord.ui.TextInput(label='Ссылка')
     async def on_submit(self, interaction):
@@ -223,36 +224,43 @@ class AdminSelect(discord.ui.View):
     @discord.ui.button(label="🔗 YouTube Ссылка", style=discord.ButtonStyle.blurple, row=4)
     async def btn_yt(self, interaction, button): await interaction.response.send_modal(YouTubeURLModal())
     
-    # --- КНОПКА СОЗДАНИЯ ВЕРИФИКАЦИИ ---
+    # --- БЕЗОПАСНОЕ СОЗДАНИЕ ВЕРИФИКАЦИИ ---
     @discord.ui.button(label="🛠 Создать Верификацию", style=discord.ButtonStyle.green, row=4)
     async def btn_ver(self, interaction, button):
+        # 1. Сразу отвечаем пользователю, чтобы не было ошибки "Interaction Failed"
         await interaction.response.send_message("⚙️ Создаю...", ephemeral=True)
         guild = interaction.guild
         
-        # 1. СНАЧАЛА Создаем роль
-        verified_role = await guild.create_role(name="Verified", permissions=discord.Permissions(read_messages=True, view_channels=True, send_messages=True, connect=True, speak=True), color=discord.Color.green())
-        
-        # 2. Обновляем конфиг
-        update_config(guild.id, "verify_role_id", verified_role.id)
-        
-        # 3. Создаем канал
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channels=True, read_messages=True, send_messages=False),
-            verified_role: discord.PermissionOverwrite(view_channels=False), # Верифицированные его не видят
-            guild.me: discord.PermissionOverwrite(view_channels=True)
-        }
-        verify_channel = await guild.create_text_channel("verify", overwrites=overwrites)
-        await verify_channel.send(embed=discord.Embed(title="🛡 Верификация", description="Нажмите кнопку.", color=discord.Color.gold()), view=VerifyView())
-        
-        # 4. И ТОЛЬКО В КОНЦЕ пытаемся скрыть каналы (это может не сработать, но роль уже есть!)
-        msg_end = f"✅ Успешно! Роль: {verified_role.mention}, Канал: {verify_channel.mention}."
         try:
-            await guild.default_role.edit(permissions=discord.Permissions(read_messages=False, view_channels=False))
-            msg_end += "\n✅ Изоляция настроена автоматически."
-        except:
-            msg_end += "\n⚠️ Не удалось скрыть каналы для @everyone автоматически. Зайдите в настройки роли @everyone и отключите 'Просмотр каналов' вручную."
-        
-        await interaction.followup.send(msg_end)
+            # 2. Создаем роль (Безопасно)
+            verified_role = await guild.create_role(name="Verified", permissions=discord.Permissions(read_messages=True, view_channels=True, send_messages=True, connect=True, speak=True), color=discord.Color.green())
+            update_config(guild.id, "verify_role_id", verified_role.id)
+            
+            # 3. Создаем канал (Безопасно)
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(view_channels=True, read_messages=True, send_messages=False),
+                verified_role: discord.PermissionOverwrite(view_channels=False), # Уже верифицированные не видят канал
+                guild.me: discord.PermissionOverwrite(view_channels=True)
+            }
+            verify_channel = await guild.create_text_channel("verify", overwrites=overwrites)
+            await verify_channel.send(embed=discord.Embed(title="🛡 Верификация", description="Нажмите кнопку.", color=discord.Color.gold()), view=VerifyView())
+            
+            # 4. Пробуем скрыть каналы (ОПАСНО, но завернуто в try/except)
+            status_msg = f"✅ Готово! Роль: {verified_role.mention}, Канал: {verify_channel.mention}."
+            
+            try:
+                await guild.default_role.edit(permissions=discord.Permissions(read_messages=False, view_channels=False))
+                status_msg += "\n✅ Изоляция настроена автоматически."
+            except:
+                status_msg += "\n⚠️ Не удалось скрыть каналы для @everyone автоматически (нет прав). Сделайте это вручную в настройках роли @everyone."
+            
+            # 5. Отправляем финальный отчет
+            await interaction.followup.send(status_msg)
+
+        except Exception as e:
+            # Если что-то пошло не так, сообщаем ошибку, а не зависаем
+            await interaction.followup.send(f"❌ Критическая ошибка: {e}")
+            traceback.print_exc()
 
     @discord.ui.button(label="🎫 Создать Тикеты", style=discord.ButtonStyle.gray, row=4)
     async def btn_tic(self, interaction, button):
