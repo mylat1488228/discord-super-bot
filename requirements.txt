@@ -3,3 +3,4 @@ yt-dlp
 pynacl
 aiohttp
 feedparser
+Pillow
