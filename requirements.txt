@@ -4,3 +4,4 @@ pynacl
 aiohttp
 feedparser
 Pillow
+mcstatus
