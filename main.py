@@ -215,7 +215,6 @@ class AdminSelect(discord.ui.View):
         await interaction.response.send_message("⚙️ Создаю...", ephemeral=True)
         guild = interaction.guild
         try:
-            # ИСПОЛЬЗУЕМ read_messages ВМЕСТО view_channels
             role = await guild.create_role(name="Verified", color=discord.Color.green(), permissions=discord.Permissions(read_messages=True, send_messages=True, connect=True, speak=True))
             update_config(guild.id, "verify_role_id", role.id)
             
@@ -228,7 +227,6 @@ class AdminSelect(discord.ui.View):
             ch = await guild.create_text_channel("verify", overwrites=overwrites)
             await ch.send(embed=discord.Embed(title="🛡 Верификация", description="Нажмите кнопку для доступа.", color=discord.Color.gold()), view=VerifyView())
             
-            # Попытка изоляции
             try: 
                 await guild.default_role.edit(permissions=discord.Permissions(read_messages=False))
                 await interaction.followup.send("✅ Готово! Изоляция включена.")
@@ -256,6 +254,22 @@ async def on_member_join(member):
         if channel:
             file = await create_banner(member, "ДОБРО ПОЖАЛОВАТЬ", "welcome_bg.png")
             await channel.send(f"Привет, {member.mention}!", file=file)
+
+@bot.event
+async def on_guild_join(guild):
+    # АВТОМАТИЧЕСКИЕ НАСТРОЙКИ ПРИ ДОБАВЛЕНИИ БОТА
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(read_messages=False),
+        guild.me: discord.PermissionOverwrite(read_messages=True)
+    }
+    if guild.owner:
+        overwrites[guild.owner] = discord.PermissionOverwrite(read_messages=True)
+    try:
+        cat = await guild.create_category("BOT SETTINGS", overwrites=overwrites)
+        chan = await guild.create_text_channel("admin-panel", category=cat)
+        await chan.send(embed=discord.Embed(title="⚙️ Админ Панель"), view=AdminSelect())
+    except:
+        pass
 
 @bot.event
 async def on_member_remove(member):
@@ -286,6 +300,24 @@ async def stop(ctx):
 @bot.command()
 async def reset(ctx):
     if ctx.author.guild_permissions.administrator: cursor.execute("DELETE FROM configs WHERE guild_id=?", (ctx.guild.id,)); conn.commit(); await ctx.send("✅")
+
+@bot.command()
+async def setup(ctx):
+    """СОЗДАТЬ ПАНЕЛЬ ВРУЧНУЮ"""
+    if ctx.author.guild_permissions.administrator or ctx.author.name in ADMINS:
+        overwrites = {
+            ctx.guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            ctx.guild.me: discord.PermissionOverwrite(read_messages=True)
+        }
+        overwrites[ctx.author] = discord.PermissionOverwrite(read_messages=True)
+        
+        cat = await ctx.guild.create_category("BOT SETTINGS", overwrites=overwrites)
+        chan = await ctx.guild.create_text_channel("admin-panel", category=cat)
+        
+        await chan.send(embed=discord.Embed(title="⚙️ Админ Панель", description="Настройки бота."), view=AdminSelect())
+        await ctx.send(f"✅ Панель создана: {chan.mention}")
+    else:
+        await ctx.send("Нет прав.")
 
 @bot.command()
 async def admin(ctx):
