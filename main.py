@@ -174,14 +174,13 @@ class MarketSelectView(discord.ui.View):
     @discord.ui.button(label="HolyWorld", style=discord.ButtonStyle.primary, emoji="💙", custom_id="m_hw")
     async def hw(self, i, b): c=get_config(i.guild.id); (await i.response.send_modal(MarketModal("HolyWorld", c[11]))) if c and c[11] else await i.response.send_message("Не настроено", ephemeral=True)
 
-# --- АДМИН ПАНЕЛЬ (НОВАЯ) ---
+# --- АДМИН ПАНЕЛЬ ---
 class SocialsModal(discord.ui.Modal, title="Настройка ссылок"):
     yt = discord.ui.TextInput(label="YouTube", required=False)
     tg = discord.ui.TextInput(label="Telegram", required=False)
     tt = discord.ui.TextInput(label="TikTok", required=False)
     tw = discord.ui.TextInput(label="Twitch", required=False)
     async def on_submit(self, i):
-        # Сохраняем в БД
         cursor.execute("UPDATE configs SET social_yt=?, social_tg=?, social_tt=?, social_twitch=? WHERE guild_id=?", 
                        (self.yt.value, self.tg.value, self.tt.value, self.tw.value, i.guild.id))
         conn.commit()
@@ -189,20 +188,12 @@ class SocialsModal(discord.ui.Modal, title="Настройка ссылок"):
 
 class AdminSelect(discord.ui.View):
     def __init__(self): super().__init__(timeout=None)
-    
-    # ROW 0: Выбор Текстового канала для музыки
     @discord.ui.select(cls=discord.ui.ChannelSelect, placeholder="1. Выберите ЧАТ для команд музыки", channel_types=[discord.ChannelType.text], row=0)
     async def s_mus_txt(self, i, s): update_config(i.guild.id, "music_text_channel_id", s.values[0].id); await i.response.send_message(f"✅ Команды музыки только в: {s.values[0].mention}", ephemeral=True)
-
-    # ROW 1: Выбор Каналов Рынка (Один селект для FT)
     @discord.ui.select(cls=discord.ui.ChannelSelect, placeholder="2. Выберите канал РЫНКА FT", channel_types=[discord.ChannelType.text], row=1)
     async def s_ft(self, i, s): update_config(i.guild.id, "market_ft_channel_id", s.values[0].id); await i.response.send_message("✅ Рынок FT настроен", ephemeral=True)
-
-    # ROW 2: Выбор Каналов Рынка (Один селект для HW)
     @discord.ui.select(cls=discord.ui.ChannelSelect, placeholder="3. Выберите канал РЫНКА HW", channel_types=[discord.ChannelType.text], row=2)
     async def s_hw(self, i, s): update_config(i.guild.id, "market_hw_channel_id", s.values[0].id); await i.response.send_message("✅ Рынок HW настроен", ephemeral=True)
-
-    # ROW 3: Кнопки создания менюшек
     @discord.ui.button(label="🔊 Меню Приваток", style=discord.ButtonStyle.blurple, row=3)
     async def b_pv(self, i, b):
         cat = await i.guild.create_category("Приватные Комнаты")
@@ -210,29 +201,36 @@ class AdminSelect(discord.ui.View):
         ch = await i.guild.create_text_channel("create-room")
         await ch.send(embed=discord.Embed(title="🔊 Личный Войс", description="Создайте свою комнату:", color=discord.Color.fuchsia()), view=PrivateVoiceView())
         await i.response.send_message("✅", ephemeral=True)
-
     @discord.ui.button(label="🏪 Меню Рынка", style=discord.ButtonStyle.danger, row=3)
     async def b_m(self, i, b): ch=await i.guild.create_text_channel("create-ad"); await ch.send(embed=discord.Embed(title="🏪 Рынок", color=discord.Color.orange()), view=MarketSelectView()); await i.response.send_message("✅", ephemeral=True)
-
     @discord.ui.button(label="🔗 Соцсети", style=discord.ButtonStyle.secondary, row=3)
     async def b_soc(self, i, b): await i.response.send_modal(SocialsModal())
-
-    # ROW 4: Кнопки системы
     @discord.ui.button(label="📈 Статистика", style=discord.ButtonStyle.gray, row=4)
     async def b_st(self, i, b):
+        # Удаляем старую запись
+        update_config(i.guild.id, "stats_category_id", 0)
+        
+        # Получаем данные СРАЗУ, чтобы не писать "Загрузка"
+        try: st_ft = (await (await JavaServer.async_lookup(FUNTIME_IP)).async_status()).players.online
+        except: st_ft = "Offline"
+        try: st_hw = (await (await JavaServer.async_lookup(HOLYWORLD_IP)).async_status()).players.online
+        except: st_hw = "Offline"
+        
         ow = {i.guild.default_role: discord.PermissionOverwrite(connect=False, view_channel=True)}
         cat = await i.guild.create_category("📊 СТАТИСТИКА", overwrites=ow, position=0)
-        await i.guild.create_voice_channel("📊 Загрузка...", category=cat); await i.guild.create_voice_channel("👥 Загрузка...", category=cat)
-        await i.guild.create_voice_channel("🧡 FT: ...", category=cat); await i.guild.create_voice_channel("💙 HW: ...", category=cat)
+        
+        await i.guild.create_voice_channel(f"💎 Souls Visuals", category=cat)
+        await i.guild.create_voice_channel(f"👥 Людей: {i.guild.member_count}", category=cat)
+        await i.guild.create_voice_channel(f"🧡 FT: {st_ft}", category=cat)
+        await i.guild.create_voice_channel(f"💙 HW: {st_hw}", category=cat)
+        
         update_config(i.guild.id, "stats_category_id", cat.id)
         await i.response.send_message("✅", ephemeral=True)
-
     @discord.ui.button(label="🛠 Верификация", style=discord.ButtonStyle.green, row=4)
     async def b_v(self, i, b):
         r=await i.guild.create_role(name="Verified", color=discord.Color.green()); update_config(i.guild.id, "verify_role_id", r.id)
         ow={i.guild.default_role:discord.PermissionOverwrite(read_messages=True, send_messages=False), r:discord.PermissionOverwrite(read_messages=False), i.guild.me:discord.PermissionOverwrite(read_messages=True)}
         ch=await i.guild.create_text_channel("verify", overwrites=ow); await ch.send(embed=discord.Embed(title="Верификация"), view=VerifyView()); await i.response.send_message("✅", ephemeral=True)
-
     @discord.ui.button(label="🎫 Тикеты", style=discord.ButtonStyle.primary, row=4)
     async def b_t(self, i, b): c=await i.guild.create_category("Support"); update_config(i.guild.id, "ticket_category_id", c.id); ch=await i.guild.create_text_channel("tickets", category=c); await ch.send(embed=discord.Embed(title="Тикеты"), view=TicketStartView()); await i.response.send_message("✅", ephemeral=True)
 
@@ -259,7 +257,6 @@ class TicketControlView(discord.ui.View):
 # --- МУЗЫКАЛЬНЫЕ КОМАНДЫ (ЧАРТЫ) ---
 async def check_music_channel(interaction):
     conf = get_config(interaction.guild.id)
-    # conf[6] = music_text_channel_id
     if conf and conf[6]:
         if interaction.channel.id != conf[6]:
             chan = interaction.guild.get_channel(conf[6])
@@ -310,11 +307,11 @@ async def update_stats_loop():
             if not g or not cat: continue
             
             try: st_ft = (await (await JavaServer.async_lookup(FUNTIME_IP)).async_status()).players.online
-            except: st_ft = "-"
+            except: st_ft = "Offline"
             try: st_hw = (await (await JavaServer.async_lookup(HOLYWORLD_IP)).async_status()).players.online
-            except: st_hw = "-"
+            except: st_hw = "Offline"
             
-            names = [f"💎 {g.name}", f"👥 Людей: {g.member_count}", f"🧡 FT: {st_ft}", f"💙 HW: {st_hw}"]
+            names = [f"💎 Souls Visuals", f"👥 Людей: {g.member_count}", f"🧡 FT: {st_ft}", f"💙 HW: {st_hw}"]
             for i, c in enumerate(cat.voice_channels):
                 if i < 4: await c.edit(name=names[i])
         except: pass
