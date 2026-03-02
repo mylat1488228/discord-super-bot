@@ -6,7 +6,6 @@ import sqlite3
 import random
 import yt_dlp
 import datetime
-import feedparser
 import os
 from PIL import Image, ImageDraw, ImageFont
 import io
@@ -18,7 +17,6 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 ADMINS = ["defaultpeople", "anyachkaaaaa"] 
 FUNTIME_IP = "play.funtime.su"
 HOLYWORLD_IP = "mc.holyworld.ru"
-SERVER_NAME = "Souls Visuals" # Название твоего сервера для статы
 
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -33,6 +31,7 @@ else:
 conn = sqlite3.connect(DB_PATH)
 cursor = conn.cursor()
 
+# Добавили music_text_channel_id и поля для соцсетей
 cursor.execute('''CREATE TABLE IF NOT EXISTS configs (
     guild_id INTEGER PRIMARY KEY,
     verify_role_id INTEGER,
@@ -40,8 +39,7 @@ cursor.execute('''CREATE TABLE IF NOT EXISTS configs (
     ticket_category_id INTEGER,
     ticket_log_channel_id INTEGER,
     music_channel_id INTEGER,
-    youtube_channel_url TEXT,
-    youtube_last_video_id TEXT,
+    music_text_channel_id INTEGER,
     notification_channel_id INTEGER,
     welcome_channel_id INTEGER,
     leave_channel_id INTEGER,
@@ -49,8 +47,10 @@ cursor.execute('''CREATE TABLE IF NOT EXISTS configs (
     market_hw_channel_id INTEGER,
     stats_category_id INTEGER,
     pvoice_category_id INTEGER,
-    shop_category_id INTEGER,
-    payments_enabled INTEGER DEFAULT 1
+    social_yt TEXT,
+    social_tg TEXT,
+    social_tt TEXT,
+    social_twitch TEXT
 )''')
 cursor.execute('''CREATE TABLE IF NOT EXISTS tickets (
     channel_id INTEGER PRIMARY KEY,
@@ -116,235 +116,127 @@ class YTDLSource(discord.PCMVolumeTransformer):
         filename = data['url'] if stream else ytdl.prepare_filename(data)
         return cls(discord.FFmpegPCMAudio(filename, **ffmpeg_options), data=data)
 
-# ==========================================
-# 1. ЖИВАЯ СТАТИСТИКА (СВЕРХУ)
-# ==========================================
-@tasks.loop(minutes=5)
-async def update_stats_loop():
-    cursor.execute("SELECT guild_id, stats_category_id FROM configs")
-    rows = cursor.fetchall()
-    for row in rows:
-        guild_id, cat_id = row
-        if not cat_id: continue
-        try:
-            guild = bot.get_guild(guild_id)
-            if not guild: continue
-            
-            # Получаем онлайн серверов
-            try: 
-                s_ft = await JavaServer.async_lookup(FUNTIME_IP)
-                st_ft = await s_ft.async_status()
-                ft_online = st_ft.players.online
-            except: ft_online = "Off"
+# --- ПРИВАТНЫЕ ВОЙСЫ ---
+class PrivateVoiceControl(discord.ui.View):
+    def __init__(self, voice_channel): super().__init__(timeout=None); self.voice_channel = voice_channel
+    @discord.ui.select(cls=discord.ui.UserSelect, placeholder="➕ Добавить людей", min_values=1, max_values=10, row=0)
+    async def whitelist_user(self, i, s):
+        res = cursor.execute("SELECT owner_id FROM voice_channels WHERE voice_id = ?", (self.voice_channel.id,)).fetchone()
+        if not res or res[0] != i.user.id: return await i.response.send_message("❌ Не владелец.", ephemeral=True)
+        for u in s.values: await self.voice_channel.set_permissions(u, connect=True, view_channel=True)
+        await i.response.send_message(f"✅ Добавлены.", ephemeral=True)
+    @discord.ui.button(label="🔒 Закрыть", style=discord.ButtonStyle.red, row=1)
+    async def l(self, i, b): await self.voice_channel.set_permissions(i.guild.default_role, connect=False); await i.response.send_message("🔒", ephemeral=True)
+    @discord.ui.button(label="🔓 Открыть", style=discord.ButtonStyle.green, row=1)
+    async def u(self, i, b): await self.voice_channel.set_permissions(i.guild.default_role, connect=True); await i.response.send_message("🔓", ephemeral=True)
 
-            try:
-                s_hw = await JavaServer.async_lookup(HOLYWORLD_IP)
-                st_hw = await s_hw.async_status()
-                hw_online = st_hw.players.online
-            except: hw_online = "Off"
+class PrivateVoiceCreateModal(discord.ui.Modal, title='Создать комнату'):
+    v_name = discord.ui.TextInput(label='Название', max_length=20)
+    v_limit = discord.ui.TextInput(label='Лимит', placeholder='0 = безлимит', max_length=2, required=False)
+    async def on_submit(self, i):
+        c = get_config(i.guild.id)
+        if not c or not c[13]: return await i.response.send_message("❌ Не настроено.", ephemeral=True)
+        cat = i.guild.get_channel(c[13])
+        try: lim = int(self.v_limit.value) if self.v_limit.value else 0
+        except: lim = 0
+        ow = {i.guild.default_role: discord.PermissionOverwrite(connect=False, view_channel=True), i.user: discord.PermissionOverwrite(connect=True, view_channel=True, manage_channels=True, move_members=True)}
+        vc = await i.guild.create_voice_channel(name=self.v_name.value, category=cat, user_limit=lim, overwrites=ow)
+        cursor.execute("INSERT INTO voice_channels (voice_id, owner_id) VALUES (?, ?)", (vc.id, i.user.id)); conn.commit()
+        if i.user.voice: await i.user.move_to(vc)
+        await i.response.send_message(embed=discord.Embed(title=f"⚙️ {self.v_name.value}", color=discord.Color.gold()), view=PrivateVoiceControl(vc), ephemeral=True)
 
-            # Названия каналов
-            ch_names = [
-                f"💎 {SERVER_NAME}",
-                f"👥 Людей: {guild.member_count}",
-                f"🧡 FT: {ft_online}",
-                f"💙 HW: {hw_online}"
-            ]
-
-            category = guild.get_channel(cat_id)
-            if category:
-                # Проходим по каналам в категории и обновляем их
-                for i, channel in enumerate(category.voice_channels):
-                    if i < len(ch_names) and channel.name != ch_names[i]:
-                        await channel.edit(name=ch_names[i])
-        except Exception as e: print(f"Stats Error: {e}")
-
-# ==========================================
-# 2. КОНКУРСЫ (GIVEAWAY)
-# ==========================================
-
-class ContestView(discord.ui.View):
-    def __init__(self, buttons_data):
-        super().__init__(timeout=None)
-        # buttons_data = [{"label": "YouTube", "url": "..."}, ...]
-        for btn in buttons_data:
-            self.add_item(discord.ui.Button(label=btn['label'], url=btn['url']))
-
-    @discord.ui.button(label="🎉 Участвовать", style=discord.ButtonStyle.blurple, custom_id="join_contest")
-    async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Логика участия (простая: просто пишет в ответ)
-        # В идеале нужно писать в БД, но для простоты:
-        await interaction.response.send_message(f"✅ Вы записаны в участники!", ephemeral=True)
-
-class ContestCreateModal(discord.ui.Modal, title="Создание Конкурса"):
-    c_title = discord.ui.TextInput(label="Название", max_length=50)
-    c_desc = discord.ui.TextInput(label="Условия и Призы", style=discord.TextStyle.paragraph)
-    c_photo = discord.ui.TextInput(label="Ссылка на фото", required=False)
-    
-    # Ссылки (можно ввести одну для теста, для множества нужно сложное меню, упростим)
-    c_link_name = discord.ui.TextInput(label="Название кнопки (например YouTube)", required=False)
-    c_link_url = discord.ui.TextInput(label="Ссылка", required=False)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        embed = discord.Embed(title=f"🎉 {self.c_title.value}", description=self.c_desc.value, color=discord.Color.fuchsia())
-        if self.c_photo.value: embed.set_image(url=self.c_photo.value)
-        embed.set_footer(text="Нажмите кнопку ниже, чтобы участвовать!")
-        
-        btns = []
-        if self.c_link_name.value and self.c_link_url.value:
-            btns.append({"label": self.c_link_name.value, "url": self.c_link_url.value})
-            
-        await interaction.channel.send(embed=embed, view=ContestView(btns))
-        await interaction.response.send_message("✅ Конкурс опубликован!", ephemeral=True)
-
-# ==========================================
-# 3. МАГАЗИН (SHOP SYSTEM)
-# ==========================================
-
-class ShopControlView(discord.ui.View):
+class PrivateVoiceView(discord.ui.View):
     def __init__(self): super().__init__(timeout=None)
-    
-    @discord.ui.button(label="✅ Оплатил", style=discord.ButtonStyle.green)
-    async def paid(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(f"{interaction.user.mention} сообщил об оплате! Ожидайте администратора.", allowed_mentions=discord.AllowedMentions(users=True))
+    @discord.ui.button(label="➕ Создать комнату", style=discord.ButtonStyle.blurple, custom_id="cpv")
+    async def cr(self, i, b): await i.response.send_modal(PrivateVoiceCreateModal())
 
-    @discord.ui.button(label="🔒 Закрыть сделку", style=discord.ButtonStyle.red)
-    async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.guild_permissions.administrator:
-            await interaction.channel.delete()
-        else:
-            await interaction.response.send_message("Только админ может закрыть сделку.", ephemeral=True)
+# --- РЫНОК ---
+class MarketModal(discord.ui.Modal, title='Продажа'):
+    item_name = discord.ui.TextInput(label='Товар')
+    item_price = discord.ui.TextInput(label='Цена')
+    item_desc = discord.ui.TextInput(label='Описание', style=discord.TextStyle.paragraph)
+    item_photo = discord.ui.TextInput(label='Ссылка на фото', required=False)
+    def __init__(self, m_type, c_id): super().__init__(); self.m_type=m_type; self.c_id=c_id
+    async def on_submit(self, i):
+        ch = i.guild.get_channel(self.c_id)
+        if not ch: return await i.response.send_message("Ошибка канала", ephemeral=True)
+        col = discord.Color.orange() if self.m_type == "FunTime" else discord.Color.blue()
+        emb = discord.Embed(title=f"🛒 {self.m_type}", color=col, timestamp=datetime.datetime.now())
+        emb.set_author(name=i.user.display_name, icon_url=i.user.display_avatar.url)
+        emb.add_field(name="📦", value=self.item_name.value); emb.add_field(name="💰", value=self.item_price.value); emb.add_field(name="📝", value=self.item_desc.value, inline=False); emb.set_footer(text=f"Продавец: {i.user.name}")
+        if self.item_photo.value: emb.set_image(url=self.item_photo.value)
+        await ch.send(embed=emb); await i.response.send_message("✅", ephemeral=True)
 
-async def create_shop_channel(interaction, product_name, price):
-    # Проверка на включенную платежку
-    conf = get_config(interaction.guild.id)
-    # conf[16] = payments_enabled (1 or 0)
-    if conf and conf[16] == 0:
-        return await interaction.response.send_message("⛔ Платежная система временно отключена администрацией.", ephemeral=True)
-
-    guild = interaction.guild
-    # Категория для заказов (ищем по имени или создаем)
-    cat = discord.utils.get(guild.categories, name="🛒 Заказы")
-    if not cat: cat = await guild.create_category("🛒 Заказы")
-    
-    overwrites = {
-        guild.default_role: discord.PermissionOverwrite(read_messages=False),
-        guild.me: discord.PermissionOverwrite(read_messages=True),
-        interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True)
-    }
-    
-    # Создаем приватный канал
-    ch_name = f"buy-{interaction.user.name}"[:20]
-    ch = await guild.create_text_channel(ch_name, category=cat, overwrites=overwrites)
-    
-    embed = discord.Embed(title="🧾 СЧЕТ НА ОПЛАТУ", color=discord.Color.green())
-    embed.add_field(name="Товар", value=product_name)
-    embed.add_field(name="К оплате", value=price)
-    embed.add_field(name="Реквизиты", value="Карта: `0000 0000 0000 0000` (Сбер)\nНик: `Admin`", inline=False)
-    embed.set_footer(text="После оплаты прикрепите скриншот и нажмите кнопку.")
-    
-    await ch.send(f"{interaction.user.mention}", embed=embed, view=ShopControlView())
-    await interaction.response.send_message(f"✅ Для оплаты перейдите в канал: {ch.mention}", ephemeral=True)
-
-# --- VIEWS ДЛЯ МАГАЗИНА ---
-class ShopAdsView(discord.ui.View):
+class MarketSelectView(discord.ui.View):
     def __init__(self): super().__init__(timeout=None)
-    @discord.ui.button(label="1 день (без пинга) - 50р", style=discord.ButtonStyle.secondary)
-    async def b1(self, i, b): await create_shop_channel(i, "Реклама 1 день (без пинга)", "50 RUB")
-    @discord.ui.button(label="1 день (с пингом) - 100р", style=discord.ButtonStyle.primary)
-    async def b2(self, i, b): await create_shop_channel(i, "Реклама 1 день (с пингом)", "100 RUB")
-    @discord.ui.button(label="3 дня - 200р", style=discord.ButtonStyle.secondary)
-    async def b3(self, i, b): await create_shop_channel(i, "Реклама 3 дня", "200 RUB")
-    @discord.ui.button(label="Неделя - 400р", style=discord.ButtonStyle.primary)
-    async def b4(self, i, b): await create_shop_channel(i, "Реклама Неделя", "400 RUB")
+    @discord.ui.button(label="FunTime", style=discord.ButtonStyle.danger, emoji="🧡", custom_id="m_ft")
+    async def ft(self, i, b): c=get_config(i.guild.id); (await i.response.send_modal(MarketModal("FunTime", c[10]))) if c and c[10] else await i.response.send_message("Не настроено", ephemeral=True)
+    @discord.ui.button(label="HolyWorld", style=discord.ButtonStyle.primary, emoji="💙", custom_id="m_hw")
+    async def hw(self, i, b): c=get_config(i.guild.id); (await i.response.send_modal(MarketModal("HolyWorld", c[11]))) if c and c[11] else await i.response.send_message("Не настроено", ephemeral=True)
 
-class ShopBotView(discord.ui.View):
-    def __init__(self): super().__init__(timeout=None)
-    @discord.ui.button(label="Полный бот - 1000р", style=discord.ButtonStyle.success)
-    async def b1(self, i, b): await create_shop_channel(i, "Полный Бот", "1000 RUB")
-    @discord.ui.button(label="Лайт версия - 500р", style=discord.ButtonStyle.secondary)
-    async def b2(self, i, b): await create_shop_channel(i, "Лайт Бот", "500 RUB")
+# --- АДМИН ПАНЕЛЬ (НОВАЯ) ---
+class SocialsModal(discord.ui.Modal, title="Настройка ссылок"):
+    yt = discord.ui.TextInput(label="YouTube", required=False)
+    tg = discord.ui.TextInput(label="Telegram", required=False)
+    tt = discord.ui.TextInput(label="TikTok", required=False)
+    tw = discord.ui.TextInput(label="Twitch", required=False)
+    async def on_submit(self, i):
+        # Сохраняем в БД
+        cursor.execute("UPDATE configs SET social_yt=?, social_tg=?, social_tt=?, social_twitch=? WHERE guild_id=?", 
+                       (self.yt.value, self.tg.value, self.tt.value, self.tw.value, i.guild.id))
+        conn.commit()
+        await i.response.send_message("✅ Ссылки сохранены!", ephemeral=True)
 
-class ShopServerView(discord.ui.View):
-    def __init__(self): super().__init__(timeout=None)
-    @discord.ui.button(label="Полная (с ботом) - 1500р", style=discord.ButtonStyle.danger)
-    async def b1(self, i, b): await create_shop_channel(i, "Настройка Full + Bot", "1500 RUB")
-    @discord.ui.button(label="Без бота - 800р", style=discord.ButtonStyle.primary)
-    async def b2(self, i, b): await create_shop_channel(i, "Настройка (без бота)", "800 RUB")
-    @discord.ui.button(label="Только чаты - 300р", style=discord.ButtonStyle.secondary)
-    async def b3(self, i, b): await create_shop_channel(i, "Настройка (только чаты)", "300 RUB")
-
-class ShopCategorySelect(discord.ui.View):
-    def __init__(self): super().__init__(timeout=None)
-    @discord.ui.select(placeholder="Выберите категорию", min_values=1, max_values=1, options=[
-        discord.SelectOption(label="Реклама", description="Пиар вашего проекта", emoji="📢"),
-        discord.SelectOption(label="Бот", description="Покупка/Аренда бота", emoji="🤖"),
-        discord.SelectOption(label="Настройка сервера", description="Оформление под ключ", emoji="⚙️"),
-        discord.SelectOption(label="КФГ / Визуалы", description="Конфиги для читов", emoji="🎮")
-    ])
-    async def select_category(self, interaction: discord.Interaction, select: discord.ui.Select):
-        val = select.values[0]
-        if val == "Реклама":
-            await interaction.response.send_message("📢 **Выберите тариф рекламы:**", view=ShopAdsView(), ephemeral=True)
-        elif val == "Бот":
-            await interaction.response.send_message("🤖 **Выберите версию бота:**", view=ShopBotView(), ephemeral=True)
-        elif val == "Настройка сервера":
-            await interaction.response.send_message("⚙️ **Тип настройки:**", view=ShopServerView(), ephemeral=True)
-        else:
-            await create_shop_channel(interaction, f"Запрос: {val}", "Договорная")
-
-# ==========================================
-# 4. АДМИН ПАНЕЛЬ (ОБНОВЛЕННАЯ)
-# ==========================================
 class AdminSelect(discord.ui.View):
     def __init__(self): super().__init__(timeout=None)
     
-    # ROW 0
-    @discord.ui.select(cls=discord.ui.ChannelSelect, placeholder="Канал РЫНКА FunTime", channel_types=[discord.ChannelType.text], row=0)
-    async def s_ft(self, i, s): update_config(i.guild.id, "market_ft_channel_id", s.values[0].id); await i.response.send_message("✅", ephemeral=True)
-    
-    # ROW 1
-    @discord.ui.select(cls=discord.ui.ChannelSelect, placeholder="Канал РЫНКА HolyWorld", channel_types=[discord.ChannelType.text], row=1)
-    async def s_hw(self, i, s): update_config(i.guild.id, "market_hw_channel_id", s.values[0].id); await i.response.send_message("✅", ephemeral=True)
+    # ROW 0: Выбор Текстового канала для музыки
+    @discord.ui.select(cls=discord.ui.ChannelSelect, placeholder="1. Выберите ЧАТ для команд музыки", channel_types=[discord.ChannelType.text], row=0)
+    async def s_mus_txt(self, i, s): update_config(i.guild.id, "music_text_channel_id", s.values[0].id); await i.response.send_message(f"✅ Команды музыки только в: {s.values[0].mention}", ephemeral=True)
 
-    # ROW 2 (Buttons)
-    @discord.ui.button(label="📈 Создать Статы (Сверху)", style=discord.ButtonStyle.blurple, row=2)
-    async def btn_stats(self, i, b):
-        overwrites = {i.guild.default_role: discord.PermissionOverwrite(connect=False, view_channel=True)}
-        cat = await i.guild.create_category("📊 СТАТИСТИКА", overwrites=overwrites, position=0)
-        await i.guild.create_voice_channel(f"💎 {SERVER_NAME}", category=cat)
-        await i.guild.create_voice_channel("👥 Загрузка...", category=cat)
-        await i.guild.create_voice_channel("🧡 FT: Загрузка...", category=cat)
-        await i.guild.create_voice_channel("💙 HW: Загрузка...", category=cat)
+    # ROW 1: Выбор Каналов Рынка (Один селект для FT)
+    @discord.ui.select(cls=discord.ui.ChannelSelect, placeholder="2. Выберите канал РЫНКА FT", channel_types=[discord.ChannelType.text], row=1)
+    async def s_ft(self, i, s): update_config(i.guild.id, "market_ft_channel_id", s.values[0].id); await i.response.send_message("✅ Рынок FT настроен", ephemeral=True)
+
+    # ROW 2: Выбор Каналов Рынка (Один селект для HW)
+    @discord.ui.select(cls=discord.ui.ChannelSelect, placeholder="3. Выберите канал РЫНКА HW", channel_types=[discord.ChannelType.text], row=2)
+    async def s_hw(self, i, s): update_config(i.guild.id, "market_hw_channel_id", s.values[0].id); await i.response.send_message("✅ Рынок HW настроен", ephemeral=True)
+
+    # ROW 3: Кнопки создания менюшек
+    @discord.ui.button(label="🔊 Меню Приваток", style=discord.ButtonStyle.blurple, row=3)
+    async def b_pv(self, i, b):
+        cat = await i.guild.create_category("Приватные Комнаты")
+        update_config(i.guild.id, "pvoice_category_id", cat.id)
+        ch = await i.guild.create_text_channel("create-room")
+        await ch.send(embed=discord.Embed(title="🔊 Личный Войс", description="Создайте свою комнату:", color=discord.Color.fuchsia()), view=PrivateVoiceView())
+        await i.response.send_message("✅", ephemeral=True)
+
+    @discord.ui.button(label="🏪 Меню Рынка", style=discord.ButtonStyle.danger, row=3)
+    async def b_m(self, i, b): ch=await i.guild.create_text_channel("create-ad"); await ch.send(embed=discord.Embed(title="🏪 Рынок", color=discord.Color.orange()), view=MarketSelectView()); await i.response.send_message("✅", ephemeral=True)
+
+    @discord.ui.button(label="🔗 Соцсети", style=discord.ButtonStyle.secondary, row=3)
+    async def b_soc(self, i, b): await i.response.send_modal(SocialsModal())
+
+    # ROW 4: Кнопки системы
+    @discord.ui.button(label="📈 Статистика", style=discord.ButtonStyle.gray, row=4)
+    async def b_st(self, i, b):
+        ow = {i.guild.default_role: discord.PermissionOverwrite(connect=False, view_channel=True)}
+        cat = await i.guild.create_category("📊 СТАТИСТИКА", overwrites=ow, position=0)
+        await i.guild.create_voice_channel("📊 Загрузка...", category=cat); await i.guild.create_voice_channel("👥 Загрузка...", category=cat)
+        await i.guild.create_voice_channel("🧡 FT: ...", category=cat); await i.guild.create_voice_channel("💙 HW: ...", category=cat)
         update_config(i.guild.id, "stats_category_id", cat.id)
-        await i.response.send_message("✅ Статистика создана вверху!", ephemeral=True)
+        await i.response.send_message("✅", ephemeral=True)
 
-    @discord.ui.button(label="🎉 Создать Конкурс", style=discord.ButtonStyle.gray, row=2)
-    async def btn_give(self, i, b):
-        await i.response.send_modal(ContestCreateModal())
-
-    @discord.ui.button(label="🛒 Создать Магазин", style=discord.ButtonStyle.success, row=2)
-    async def btn_shop(self, i, b):
-        ch = await i.guild.create_text_channel("shop")
-        await ch.send(embed=discord.Embed(title="🛒 Магазин Услуг", description="Выберите категорию ниже:", color=discord.Color.dark_theme()), view=ShopCategorySelect())
-        await i.response.send_message(f"✅ Магазин создан: {ch.mention}", ephemeral=True)
-
-    # ROW 3
-    @discord.ui.button(label="🛑 Платежи ВКЛ/ВЫКЛ", style=discord.ButtonStyle.danger, row=3)
-    async def btn_pay_toggle(self, i, b):
-        c = get_config(i.guild.id)
-        new_val = 0 if c and c[16] == 1 else 1
-        update_config(i.guild.id, "payments_enabled", new_val)
-        status = "ВКЛЮЧЕНЫ" if new_val == 1 else "ВЫКЛЮЧЕНЫ"
-        await i.response.send_message(f"💳 Платежи теперь **{status}**", ephemeral=True)
-    
-    @discord.ui.button(label="🛠 Верификация", style=discord.ButtonStyle.green, row=3)
-    async def btn_ver(self, i, b): 
+    @discord.ui.button(label="🛠 Верификация", style=discord.ButtonStyle.green, row=4)
+    async def b_v(self, i, b):
         r=await i.guild.create_role(name="Verified", color=discord.Color.green()); update_config(i.guild.id, "verify_role_id", r.id)
         ow={i.guild.default_role:discord.PermissionOverwrite(read_messages=True, send_messages=False), r:discord.PermissionOverwrite(read_messages=False), i.guild.me:discord.PermissionOverwrite(read_messages=True)}
         ch=await i.guild.create_text_channel("verify", overwrites=ow); await ch.send(embed=discord.Embed(title="Верификация"), view=VerifyView()); await i.response.send_message("✅", ephemeral=True)
 
-# --- ПРОСТЫЕ VIEWS ---
+    @discord.ui.button(label="🎫 Тикеты", style=discord.ButtonStyle.primary, row=4)
+    async def b_t(self, i, b): c=await i.guild.create_category("Support"); update_config(i.guild.id, "ticket_category_id", c.id); ch=await i.guild.create_text_channel("tickets", category=c); await ch.send(embed=discord.Embed(title="Тикеты"), view=TicketStartView()); await i.response.send_message("✅", ephemeral=True)
+
+# --- VIEWS ---
 class VerifyView(discord.ui.View):
     def __init__(self): super().__init__(timeout=None)
     @discord.ui.button(label="Верификация", style=discord.ButtonStyle.green, custom_id="vp")
@@ -364,22 +256,75 @@ class TicketControlView(discord.ui.View):
     @discord.ui.button(label="Закрыть", style=discord.ButtonStyle.red, custom_id="clt")
     async def cl(self, i, b): await i.channel.delete()
 
+# --- МУЗЫКАЛЬНЫЕ КОМАНДЫ (ЧАРТЫ) ---
+async def check_music_channel(interaction):
+    conf = get_config(interaction.guild.id)
+    # conf[6] = music_text_channel_id
+    if conf and conf[6]:
+        if interaction.channel.id != conf[6]:
+            chan = interaction.guild.get_channel(conf[6])
+            await interaction.response.send_message(f"🚫 Используйте команды музыки только в: {chan.mention}", ephemeral=True)
+            return False
+    return True
+
+@bot.tree.command(name="play", description="Включить музыку")
+async def slash_play(i: discord.Interaction, query: str):
+    if not await check_music_channel(i): return
+    await i.response.defer()
+    if not i.user.voice: return await i.followup.send("Войс!")
+    if not i.guild.voice_client: await i.user.voice.channel.connect()
+    try: p=await YTDLSource.from_url(query, loop=bot.loop, stream=True); i.guild.voice_client.play(p); await i.followup.send(f"🎶 **{p.title}**")
+    except: await i.followup.send("Ошибка")
+
+@bot.tree.command(name="top_russia", description="Топ 100 России")
+async def top_ru(i: discord.Interaction):
+    if not await check_music_channel(i): return
+    await i.response.defer(); 
+    if not i.guild.voice_client: await i.user.voice.channel.connect()
+    try: p=await YTDLSource.from_url("Топ 100 русских песен 2024 микс", loop=bot.loop, stream=True); i.guild.voice_client.play(p); await i.followup.send(f"🇷🇺 Включаю **ТОП России**")
+    except: await i.followup.send("Ошибка")
+
+@bot.tree.command(name="top_world", description="Топ Мировой")
+async def top_wo(i: discord.Interaction):
+    if not await check_music_channel(i): return
+    await i.response.defer(); 
+    if not i.guild.voice_client: await i.user.voice.channel.connect()
+    try: p=await YTDLSource.from_url("Top 100 global songs 2024 mix", loop=bot.loop, stream=True); i.guild.voice_client.play(p); await i.followup.send(f"🌍 Включаю **ТОП Мира**")
+    except: await i.followup.send("Ошибка")
+
+@bot.tree.command(name="top_phonk", description="Топ Фонк")
+async def top_ph(i: discord.Interaction):
+    if not await check_music_channel(i): return
+    await i.response.defer(); 
+    if not i.guild.voice_client: await i.user.voice.channel.connect()
+    try: p=await YTDLSource.from_url("Best Phonk Mix 2024", loop=bot.loop, stream=True); i.guild.voice_client.play(p); await i.followup.send(f"👿 Включаю **FONK**")
+    except: await i.followup.send("Ошибка")
+
 # --- СИСТЕМА ---
+@tasks.loop(minutes=5)
+async def update_stats_loop():
+    cursor.execute("SELECT guild_id, stats_category_id FROM configs")
+    for row in cursor.fetchall():
+        try:
+            g = bot.get_guild(row[0]); cat = g.get_channel(row[1])
+            if not g or not cat: continue
+            
+            try: st_ft = (await (await JavaServer.async_lookup(FUNTIME_IP)).async_status()).players.online
+            except: st_ft = "-"
+            try: st_hw = (await (await JavaServer.async_lookup(HOLYWORLD_IP)).async_status()).players.online
+            except: st_hw = "-"
+            
+            names = [f"💎 {g.name}", f"👥 Людей: {g.member_count}", f"🧡 FT: {st_ft}", f"💙 HW: {st_hw}"]
+            for i, c in enumerate(cat.voice_channels):
+                if i < 4: await c.edit(name=names[i])
+        except: pass
+
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user}')
     await bot.tree.sync()
     update_stats_loop.start()
-    bot.add_view(VerifyView()); bot.add_view(TicketStartView()); bot.add_view(TicketControlView()); bot.add_view(AdminSelect()); bot.add_view(ShopCategorySelect())
-
-@bot.event
-async def on_guild_join(guild):
-    try:
-        ow = {guild.default_role: discord.PermissionOverwrite(read_messages=False), guild.me: discord.PermissionOverwrite(read_messages=True)}
-        cat = await guild.create_category("BOT SETTINGS", overwrites=ow)
-        ch = await guild.create_text_channel("admin-panel", category=cat)
-        await ch.send(embed=discord.Embed(title="⚙️ Админ Панель"), view=AdminSelect())
-    except: pass
+    bot.add_view(VerifyView()); bot.add_view(TicketStartView()); bot.add_view(TicketControlView()); bot.add_view(AdminSelect()); bot.add_view(MarketSelectView()); bot.add_view(PrivateVoiceView())
 
 @bot.command()
 async def setup(ctx):
@@ -399,36 +344,25 @@ async def reset(ctx):
 async def admin(ctx):
     if ctx.author.guild_permissions.administrator: await ctx.send(embed=discord.Embed(title="⚙️ Админ Панель"), view=AdminSelect())
 
-# --- ОСТАЛЬНОЕ (Музыка, Слеш) ---
-@bot.tree.command(name="play", description="Музыка")
-async def slash_play(i: discord.Interaction, query: str):
-    await i.response.defer(); 
-    if not i.user.voice: return await i.followup.send("Войс!")
-    if not i.guild.voice_client: await i.user.voice.channel.connect()
-    try: p=await YTDLSource.from_url(query, loop=bot.loop, stream=True); i.guild.voice_client.play(p); await i.followup.send(f"🎶 {p.title}")
-    except: await i.followup.send("Ошибка")
+@bot.event
+async def on_voice_state_update(member, before, after):
+    if before.channel:
+        cursor.execute("SELECT voice_id FROM voice_channels WHERE voice_id = ?", (before.channel.id,))
+        if cursor.fetchone() and len(before.channel.members) == 0:
+            await before.channel.delete(); cursor.execute("DELETE FROM voice_channels WHERE voice_id = ?", (before.channel.id,)); conn.commit()
 
-@bot.tree.command(name="top", description="Топ чарт")
-async def slash_top(i: discord.Interaction):
-    await i.response.defer()
-    if not i.user.voice: return await i.followup.send("Войс!")
-    if not i.guild.voice_client: await i.user.voice.channel.connect()
-    try: p=await YTDLSource.from_url("Топ 100 русских хитов 2024 микс", loop=bot.loop, stream=True); i.guild.voice_client.play(p); await i.followup.send(f"🔥 {p.title}")
-    except: await i.followup.send("Ошибка")
-
-# --- СОБЫТИЯ КАРТИНОК ---
 @bot.event
 async def on_member_join(member):
     c=get_config(member.guild.id)
-    if c and c[9]: 
-        ch=member.guild.get_channel(c[9])
+    if c and c[8]: 
+        ch=member.guild.get_channel(c[8])
         if ch: await ch.send(f"Привет {member.mention}", file=await create_banner(member, "WELCOME", "welcome_bg.png"))
 
 @bot.event
 async def on_member_remove(member):
     c=get_config(member.guild.id)
-    if c and c[10]: 
-        ch=member.guild.get_channel(c[10])
+    if c and c[9]: 
+        ch=member.guild.get_channel(c[9])
         if ch: await ch.send(f"Пока...", file=await create_banner(member, "GOODBYE", "goodbye_bg.png"))
 
 bot.run(TOKEN)
