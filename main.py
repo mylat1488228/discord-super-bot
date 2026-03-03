@@ -76,7 +76,7 @@ def update_config(guild_id, column, value):
     if cursor.fetchone() is None: cursor.execute("INSERT INTO configs (guild_id) VALUES (?)", (guild_id,))
     cursor.execute(f"UPDATE configs SET {column} = ? WHERE guild_id = ?", (value, guild_id)); conn.commit()
 
-# --- ПРАВА ДОСТУПА (ИСПРАВЛЕНО) ---
+# --- ПРАВА ДОСТУПА ---
 def get_admin_perms(guild):
     return {
         guild.default_role: discord.PermissionOverwrite(read_messages=False, view_channel=False),
@@ -84,13 +84,12 @@ def get_admin_perms(guild):
     }
 
 def get_public_perms(guild):
-    # ВОТ ЭТО ГЛАВНОЕ ИСПРАВЛЕНИЕ
     return {
         guild.default_role: discord.PermissionOverwrite(
-            view_channel=True,        # Видеть канал
-            read_messages=True,       # Читать
-            read_message_history=True,# ВИДЕТЬ КНОПКИ (ИСТОРИЮ)
-            send_messages=False       # Не писать
+            view_channel=True,
+            read_messages=True,
+            read_message_history=True,
+            send_messages=False
         ),
         guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, view_channel=True)
     }
@@ -99,46 +98,58 @@ def get_public_perms(guild):
 async def log_action(guild, title, desc, color=discord.Color.light_grey()):
     try:
         conf = get_config(guild.id)
-        if conf and conf[15]: # global_log
+        if conf and conf[15]: 
             ch = guild.get_channel(conf[15])
             if ch: await ch.send(embed=discord.Embed(title=title, description=desc, color=color, timestamp=datetime.datetime.now()))
     except: pass
 
-# --- ГЕНЕРАТОР КАРТИНОК ---
-async def create_banner(member, title_text, bg_filename):
-    try: background = Image.open(bg_filename).convert("RGBA")
-    except: background = Image.new("RGBA", (1000, 400), (20, 20, 60))
-    background = background.resize((1000, 400))
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(member.display_avatar.url) as resp: avatar_bytes = await resp.read()
-        avatar = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
-    except: avatar = Image.new("RGBA", (250, 250), (100, 100, 100))
-    avatar = avatar.resize((250, 250))
-    mask = Image.new("L", (250, 250), 0); draw_mask = ImageDraw.Draw(mask); draw_mask.ellipse((0, 0, 250, 250), fill=255)
-    stroke = Image.new("RGBA", (260, 260), (0, 0, 0, 0)); draw_stroke = ImageDraw.Draw(stroke); draw_stroke.ellipse((0, 0, 260, 260), fill=None, outline=(0, 191, 255), width=5)
-    output = background.copy(); output.paste(stroke, (50, 70), stroke); output.paste(avatar, (55, 75), mask)
-    draw = ImageDraw.Draw(output)
-    try: font_large = ImageFont.truetype("font.ttf", 80); font_small = ImageFont.truetype("font.ttf", 50)
-    except: font_large = ImageFont.load_default(); font_small = ImageFont.load_default()
-    draw.text((354, 104), title_text, fill="black", font=font_large); draw.text((354, 204), str(member), fill="black", font=font_small)
-    draw.text((350, 100), title_text, fill=(255, 255, 255), font=font_large); draw.text((350, 200), str(member), fill=(0, 255, 255), font=font_small)
-    buffer = io.BytesIO(); output.save(buffer, format="PNG"); buffer.seek(0)
-    return discord.File(buffer, filename="welcome.png")
-
-# --- МУЗЫКА ---
+# --- МУЗЫКА (ОБНОВЛЕННЫЙ ПЛЕЕР) ---
 yt_dlp.utils.bug_reports_message = lambda: ''
-ytdl_format_options = {'format': 'bestaudio/best', 'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s', 'restrictfilenames': True, 'noplaylist': True, 'nocheckcertificate': True, 'ignoreerrors': False, 'logtostderr': False, 'quiet': True, 'no_warnings': True, 'default_search': 'auto', 'source_address': '0.0.0.0', 'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}}
-ffmpeg_options = {'options': '-vn', 'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'}
+
+ytdl_format_options = {
+    'format': 'bestaudio/best',
+    'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
+    'restrictfilenames': True,
+    'noplaylist': True,
+    'nocheckcertificate': True,
+    'ignoreerrors': False,
+    'logtostderr': False,
+    'quiet': True,
+    'no_warnings': True,
+    'default_search': 'auto',
+    'source_address': '0.0.0.0',
+    # ВАЖНО: Маскировка под браузер
+    'http_headers': {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    }
+}
+
+ffmpeg_options = {
+    'options': '-vn',
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'
+}
+
 ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
+
 class YTDLSource(discord.PCMVolumeTransformer):
-    def __init__(self, source, *, data, volume=0.5): super().__init__(source, volume); self.data = data; self.title = data.get('title'); self.url = data.get('url')
+    def __init__(self, source, *, data, volume=0.5):
+        super().__init__(source, volume)
+        self.data = data
+        self.title = data.get('title')
+        self.url = data.get('url')
+
     @classmethod
     async def from_url(cls, url, *, loop=None, stream=False):
         loop = loop or asyncio.get_event_loop()
-        if not url.startswith("http"): url = f"ytsearch:{url}"
+        
+        if not url.startswith("http"):
+            url = f"ytsearch:{url}"
+            
         data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream))
-        if 'entries' in data: data = data['entries'][0]
+        
+        if 'entries' in data:
+            data = data['entries'][0]
+
         filename = data['url'] if stream else ytdl.prepare_filename(data)
         return cls(discord.FFmpegPCMAudio(filename, **ffmpeg_options), data=data)
 
@@ -162,9 +173,9 @@ class PrivateVoiceCreateModal(discord.ui.Modal, title='Создать комна
     async def on_submit(self, i):
         try:
             c = get_config(i.guild.id)
-            if not c or not c[14]: return await i.response.send_message("❌ Админ не настроил категорию приваток!", ephemeral=True)
+            if not c or not c[14]: return await i.response.send_message("❌ Админ не настроил категорию!", ephemeral=True)
             cat = i.guild.get_channel(c[14])
-            if not cat: return await i.response.send_message("❌ Категория удалена. Перенастройте бота.", ephemeral=True)
+            if not cat: return await i.response.send_message("❌ Категория удалена.", ephemeral=True)
             try: lim = int(self.v_limit.value) if self.v_limit.value else 0
             except: lim = 0
             ow = {i.guild.default_role: discord.PermissionOverwrite(connect=False, view_channel=True), i.user: discord.PermissionOverwrite(connect=True, view_channel=True, manage_channels=True, move_members=True)}
@@ -271,7 +282,8 @@ class SocialsModal(discord.ui.Modal, title="Настройка ссылок"):
 class AdminSelect(discord.ui.View):
     def __init__(self): super().__init__(timeout=None)
     @discord.ui.button(label="🎵 Создать Чат Музыки", style=discord.ButtonStyle.blurple, row=0)
-    async def b_mc(self, i, b): ch=await i.guild.create_text_channel("music-cmd", overwrites=get_public_perms(i.guild)); update_config(i.guild.id, "music_text_channel_id", ch.id); await i.response.send_message(f"✅ {ch.mention}", ephemeral=True)
+    async def b_mc(self, i, b): 
+        ch=await i.guild.create_text_channel("music-cmd", overwrites=get_public_perms(i.guild)); update_config(i.guild.id, "music_text_channel_id", ch.id); await i.response.send_message(f"✅ {ch.mention}", ephemeral=True)
     
     @discord.ui.button(label="🏪 Создать Каналы Рынков", style=discord.ButtonStyle.danger, row=0)
     async def b_mk(self, i, b):
@@ -382,6 +394,29 @@ async def top_ru(i: discord.Interaction):
     try: p=await YTDLSource.from_url("Топ 100 русских песен 2024 микс", loop=bot.loop, stream=True); i.guild.voice_client.play(p); await i.followup.send(f"🇷🇺 **ТОП России**")
     except: await i.followup.send("Ошибка")
 
+# --- ГЕНЕРАТОР КАРТИНОК ---
+async def create_banner(member, title_text, bg_filename):
+    try: background = Image.open(bg_filename).convert("RGBA")
+    except: background = Image.new("RGBA", (1000, 400), (20, 20, 60))
+    background = background.resize((1000, 400))
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(member.display_avatar.url) as resp: avatar_bytes = await resp.read()
+        avatar = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
+    except: avatar = Image.new("RGBA", (250, 250), (100, 100, 100))
+    avatar = avatar.resize((250, 250))
+    mask = Image.new("L", (250, 250), 0); draw_mask = ImageDraw.Draw(mask); draw_mask.ellipse((0, 0, 250, 250), fill=255)
+    stroke = Image.new("RGBA", (260, 260), (0, 0, 0, 0)); draw_stroke = ImageDraw.Draw(stroke); draw_stroke.ellipse((0, 0, 260, 260), fill=None, outline=(0, 191, 255), width=5)
+    output = background.copy(); output.paste(stroke, (50, 70), stroke); output.paste(avatar, (55, 75), mask)
+    draw = ImageDraw.Draw(output)
+    try: font_large = ImageFont.truetype("font.ttf", 80); font_small = ImageFont.truetype("font.ttf", 50)
+    except: font_large = ImageFont.load_default(); font_small = ImageFont.load_default()
+    draw.text((354, 104), title_text, fill="black", font=font_large); draw.text((354, 204), str(member), fill="black", font=font_small)
+    draw.text((350, 100), title_text, fill=(255, 255, 255), font=font_large); draw.text((350, 200), str(member), fill=(0, 255, 255), font=font_small)
+    buffer = io.BytesIO(); output.save(buffer, format="PNG"); buffer.seek(0)
+    return discord.File(buffer, filename="welcome.png")
+
+# --- СОБЫТИЯ ---
 @tasks.loop(minutes=5)
 async def update_stats_loop():
     cursor.execute("SELECT guild_id, stats_category_id FROM configs")
@@ -403,13 +438,12 @@ async def on_ready():
     print(f'Logged in as {bot.user}')
     await bot.tree.sync()
     update_stats_loop.start()
-    bot.add_view(VerifyView()); bot.add_view(TicketStartView()); bot.add_view(TicketControlView()); bot.add_view(AdminSelect()); bot.add_view(MarketSelectView()); bot.add_view(PrivateVoiceView()); bot.add_view(ShopCatSelect())
+    bot.add_view(VerifyView()); bot.add_view(TicketStartView()); bot.add_view(TicketControlView()); bot.add_view(AdminSelect()); bot.add_view(MarketSelectView()); bot.add_view(PrivateVoiceView()); bot.add_view(ShopCatSelect()); bot.add_view(AdminSettingsView())
 
-# --- ЛОГИ ---
-@bot.event
-async def on_message_delete(message):
-    if message.author.bot: return
-    await log_action(message.guild, "🗑 Удаление", f"**{message.author}**: {message.content}", discord.Color.red())
+@bot.command()
+async def sync(ctx):
+    await bot.tree.sync()
+    await ctx.send("✅ Синхронизировано!")
 
 @bot.event
 async def on_voice_state_update(member, before, after):
@@ -417,9 +451,6 @@ async def on_voice_state_update(member, before, after):
         cursor.execute("SELECT voice_id FROM voice_channels WHERE voice_id = ?", (before.channel.id,))
         if cursor.fetchone() and len(before.channel.members) == 0:
             await before.channel.delete(); cursor.execute("DELETE FROM voice_channels WHERE voice_id = ?", (before.channel.id,)); conn.commit()
-    if before.channel != after.channel:
-        desc = f"-> {after.channel.name}" if after.channel else f"<- {before.channel.name}"
-        await log_action(member.guild, "🔊 Голос", f"**{member}** {desc}", discord.Color.blue())
 
 @bot.event
 async def on_member_join(member):
@@ -449,16 +480,12 @@ async def setup(ctx):
 
 @bot.command()
 async def fixmenus(ctx):
-    """Починить права каналов (если не видно кнопок)"""
     if not ctx.author.guild_permissions.administrator: return
-    await ctx.send("🔧 Чиним права каналов...")
-    ow = get_public_perms(ctx.guild)
-    try:
-        for ch_name in ["create-ad", "create-room", "shop", "tickets", "verify", "music-cmd"]:
-            ch = discord.utils.get(ctx.guild.text_channels, name=ch_name)
-            if ch: await ch.set_permissions(ctx.guild.default_role, view_channel=True, read_messages=True, read_message_history=True, send_messages=False)
-        await ctx.send("✅ Права обновлены!")
-    except Exception as e: await ctx.send(f"Ошибка: {e}")
+    await ctx.send("🔧 Чиним права...")
+    for ch_name in ["create-ad", "create-room", "shop", "tickets", "music-cmd"]:
+        ch = discord.utils.get(ctx.guild.text_channels, name=ch_name)
+        if ch: await ch.set_permissions(ctx.guild.default_role, view_channel=True, read_messages=True, read_message_history=True, send_messages=False)
+    await ctx.send("✅ Готово!")
 
 @bot.command()
 async def reset(ctx):
