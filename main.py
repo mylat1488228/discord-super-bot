@@ -76,6 +76,24 @@ def update_config(guild_id, column, value):
     if cursor.fetchone() is None: cursor.execute("INSERT INTO configs (guild_id) VALUES (?)", (guild_id,))
     cursor.execute(f"UPDATE configs SET {column} = ? WHERE guild_id = ?", (value, guild_id)); conn.commit()
 
+# --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ПРАВ ---
+def get_perms(guild):
+    # Пытаемся найти роль Verified
+    c = get_config(guild.id)
+    verified_role = None
+    if c and c[1]:
+        verified_role = guild.get_role(c[1])
+    
+    # Права: @everyone не видит, Бот видит, Verified видит
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(read_messages=False),
+        guild.me: discord.PermissionOverwrite(read_messages=True)
+    }
+    if verified_role:
+        overwrites[verified_role] = discord.PermissionOverwrite(read_messages=True)
+    
+    return overwrites
+
 # --- ГЕНЕРАТОР КАРТИНОК ---
 async def create_banner(member, title_text, bg_filename):
     try: background = Image.open(bg_filename).convert("RGBA")
@@ -98,54 +116,19 @@ async def create_banner(member, title_text, bg_filename):
     buffer = io.BytesIO(); output.save(buffer, format="PNG"); buffer.seek(0)
     return discord.File(buffer, filename="welcome.png")
 
-# --- МУЗЫКА (ИСПРАВЛЕННЫЕ НАСТРОЙКИ) ---
+# --- МУЗЫКА ---
 yt_dlp.utils.bug_reports_message = lambda: ''
-
-# Добавлен HTTP Header, чтобы притвориться браузером
-ytdl_format_options = {
-    'format': 'bestaudio/best',
-    'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
-    'restrictfilenames': True,
-    'noplaylist': True,
-    'nocheckcertificate': True,
-    'ignoreerrors': False,
-    'logtostderr': False,
-    'quiet': True,
-    'no_warnings': True,
-    'default_search': 'auto',
-    'source_address': '0.0.0.0',
-    'http_headers': {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-    }
-}
-
-ffmpeg_options = {
-    'options': '-vn',
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'
-}
-
+ytdl_format_options = {'format': 'bestaudio/best', 'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s', 'restrictfilenames': True, 'noplaylist': True, 'nocheckcertificate': True, 'ignoreerrors': False, 'logtostderr': False, 'quiet': True, 'no_warnings': True, 'default_search': 'auto', 'source_address': '0.0.0.0', 'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}}
+ffmpeg_options = {'options': '-vn', 'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'}
 ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
-
 class YTDLSource(discord.PCMVolumeTransformer):
-    def __init__(self, source, *, data, volume=0.5):
-        super().__init__(source, volume)
-        self.data = data
-        self.title = data.get('title')
-        self.url = data.get('url')
-
+    def __init__(self, source, *, data, volume=0.5): super().__init__(source, volume); self.data = data; self.title = data.get('title'); self.url = data.get('url')
     @classmethod
     async def from_url(cls, url, *, loop=None, stream=False):
         loop = loop or asyncio.get_event_loop()
-        
-        # Если не ссылка, добавляем поиск
-        if not url.startswith("http"):
-            url = f"ytsearch:{url}"
-            
+        if not url.startswith("http"): url = f"ytsearch:{url}"
         data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream))
-        
-        if 'entries' in data:
-            data = data['entries'][0]
-
+        if 'entries' in data: data = data['entries'][0]
         filename = data['url'] if stream else ytdl.prepare_filename(data)
         return cls(discord.FFmpegPCMAudio(filename, **ffmpeg_options), data=data)
 
@@ -241,35 +224,56 @@ class SocialsModal(discord.ui.Modal, title="Настройка ссылок"):
 class AdminSelect(discord.ui.View):
     def __init__(self): super().__init__(timeout=None)
     @discord.ui.button(label="🎵 Чат Музыки", style=discord.ButtonStyle.blurple, row=0)
-    async def b_mc(self, i, b): ch=await i.guild.create_text_channel("music-cmd"); update_config(i.guild.id, "music_text_channel_id", ch.id); await i.response.send_message(f"✅ {ch.mention}", ephemeral=True)
+    async def b_mc(self, i, b): ch=await i.guild.create_text_channel("music-cmd", overwrites=get_perms(i.guild)); update_config(i.guild.id, "music_text_channel_id", ch.id); await i.response.send_message(f"✅ {ch.mention}", ephemeral=True)
+    
     @discord.ui.button(label="🏪 Каналы Рынков", style=discord.ButtonStyle.danger, row=0)
     async def b_mk(self, i, b):
-        cat = await i.guild.create_category("РЫНОК")
+        ow = get_perms(i.guild)
+        cat = await i.guild.create_category("РЫНОК", overwrites=ow)
         ft = await i.guild.create_text_channel("рынок-ft", category=cat); hw = await i.guild.create_text_channel("рынок-hw", category=cat); ad = await i.guild.create_text_channel("реклама", category=cat)
-        cursor.execute("UPDATE configs SET market_ft_channel_id=?, market_hw_channel_id=?, market_ads_channel_id=? WHERE guild_id=?", (ft.id, hw.id, ad.id, i.guild.id)); conn.commit(); await i.response.send_message("✅", ephemeral=True)
+        cursor.execute("UPDATE configs SET market_ft_channel_id=?, market_hw_channel_id=?, market_ads_channel_id=? WHERE guild_id=?", (ft.id, hw.id, ad.id, i.guild.id)); conn.commit()
+        await i.response.send_message("✅ Каналы рынков созданы!", ephemeral=True)
+
     @discord.ui.button(label="📜 Логи", style=discord.ButtonStyle.gray, row=0)
     async def b_lg(self, i, b): ch=await i.guild.create_text_channel("global-logs"); update_config(i.guild.id, "global_log_channel_id", ch.id); await i.response.send_message(f"✅ {ch.mention}", ephemeral=True)
 
+    # ROW 1
     @discord.ui.button(label="🔊 Меню Приваток", style=discord.ButtonStyle.secondary, row=1)
     async def b_pv(self, i, b):
-        c=await i.guild.create_category("Приватные Комнаты"); update_config(i.guild.id, "pvoice_category_id", c.id)
-        ch=await i.guild.create_text_channel("create-room"); await ch.send(embed=discord.Embed(title="🔊 Личный Войс", color=discord.Color.fuchsia()), view=PrivateVoiceView()); await i.response.send_message("✅", ephemeral=True)
+        ow = get_perms(i.guild)
+        c=await i.guild.create_category("Приватные Комнаты", overwrites=ow); update_config(i.guild.id, "pvoice_category_id", c.id)
+        ch=await i.guild.create_text_channel("create-room", overwrites=ow); await ch.send(embed=discord.Embed(title="🔊 Личный Войс", color=discord.Color.fuchsia()), view=PrivateVoiceView()); await i.response.send_message("✅", ephemeral=True)
+    
     @discord.ui.button(label="🏪 Меню Рынка", style=discord.ButtonStyle.secondary, row=1)
-    async def b_mm(self, i, b): ch=await i.guild.create_text_channel("create-ad"); await ch.send(embed=discord.Embed(title="🏪 Рынок", color=discord.Color.orange()), view=MarketSelectView()); await i.response.send_message("✅", ephemeral=True)
+    async def b_mm(self, i, b): 
+        ow = get_perms(i.guild)
+        ch=await i.guild.create_text_channel("create-ad", overwrites=ow); await ch.send(embed=discord.Embed(title="🏪 Рынок", color=discord.Color.orange()), view=MarketSelectView()); await i.response.send_message("✅", ephemeral=True)
 
+    # ROW 2
     @discord.ui.button(label="📈 Статистика", style=discord.ButtonStyle.gray, row=2)
     async def b_st(self, i, b):
         ow={i.guild.default_role: discord.PermissionOverwrite(connect=False, view_channel=True)}
         c=await i.guild.create_category("📊 СТАТИСТИКА", overwrites=ow, position=0)
         await i.guild.create_voice_channel("Загрузка...", category=c); await i.guild.create_voice_channel("Загрузка...", category=c)
         update_config(i.guild.id, "stats_category_id", c.id); await i.response.send_message("✅", ephemeral=True)
+
     @discord.ui.button(label="🛠 Верификация", style=discord.ButtonStyle.green, row=2)
     async def b_v(self, i, b):
-        r=await i.guild.create_role(name="Verified", color=discord.Color.green()); update_config(i.guild.id, "verify_role_id", r.id)
-        ow={i.guild.default_role:discord.PermissionOverwrite(read_messages=True, send_messages=False), r:discord.PermissionOverwrite(read_messages=False), i.guild.me:discord.PermissionOverwrite(read_messages=True)}
+        r=await i.guild.create_role(name="Verified", color=discord.Color.green(), permissions=discord.Permissions(view_channel=True, read_messages=True, send_messages=True, connect=True, speak=True)); update_config(i.guild.id, "verify_role_id", r.id)
+        ow={i.guild.default_role:discord.PermissionOverwrite(read_messages=True, send_messages=False, read_message_history=True), r:discord.PermissionOverwrite(read_messages=False), i.guild.me:discord.PermissionOverwrite(read_messages=True)}
         ch=await i.guild.create_text_channel("verify", overwrites=ow); await ch.send(embed=discord.Embed(title="Верификация"), view=VerifyView()); await i.response.send_message("✅", ephemeral=True)
+        # Try isolate
+        try: await i.guild.default_role.edit(permissions=discord.Permissions(read_messages=False, view_channel=False))
+        except: pass
+
     @discord.ui.button(label="🎫 Тикеты", style=discord.ButtonStyle.primary, row=2)
-    async def b_t(self, i, b): c=await i.guild.create_category("Support"); l=await i.guild.create_text_channel("ticket-logs", category=c); update_config(i.guild.id, "ticket_log_channel_id", l.id); update_config(i.guild.id, "ticket_category_id", c.id); ch=await i.guild.create_text_channel("tickets", category=c); await ch.send(embed=discord.Embed(title="Тикеты"), view=TicketStartView()); await i.response.send_message("✅", ephemeral=True)
+    async def b_t(self, i, b): 
+        ow = get_perms(i.guild)
+        c=await i.guild.create_category("Support", overwrites=ow)
+        l=await i.guild.create_text_channel("ticket-logs", category=c); update_config(i.guild.id, "ticket_log_channel_id", l.id)
+        update_config(i.guild.id, "ticket_category_id", c.id); ch=await i.guild.create_text_channel("tickets", category=c, overwrites=ow); await ch.send(embed=discord.Embed(title="Тикеты"), view=TicketStartView()); await i.response.send_message("✅", ephemeral=True)
+
+    # ROW 3
     @discord.ui.button(label="🔗 Соцсети", style=discord.ButtonStyle.secondary, row=3)
     async def b_soc(self, i, b): await i.response.send_modal(SocialsModal())
 
@@ -295,7 +299,7 @@ class TicketControlView(discord.ui.View):
             if l: await l.send(f"📕 Тикет {i.channel.name} закрыт пользователем {i.user.name}")
         await i.channel.delete()
 
-# --- СЛЕШ КОМАНДЫ (С ВЫВОДОМ ОШИБКИ) ---
+# --- СЛЕШ КОМАНДЫ ---
 async def check_music_channel(interaction):
     conf = get_config(interaction.guild.id)
     if conf and conf[6] and interaction.channel.id != conf[6]:
@@ -307,41 +311,18 @@ async def check_music_channel(interaction):
 async def slash_play(i: discord.Interaction, query: str):
     if not await check_music_channel(i): return
     await i.response.defer()
-    
-    if not i.user.voice:
-        return await i.followup.send("❌ Зайдите в голосовой канал!")
-        
-    try:
-        if not i.guild.voice_client: 
-            await i.user.voice.channel.connect()
-        else:
-            await i.guild.voice_client.move_to(i.user.voice.channel)
-    except Exception as e:
-        return await i.followup.send(f"❌ Ошибка подключения к войсу: {e}")
-
-    try:
-        player = await YTDLSource.from_url(query, loop=bot.loop, stream=True)
-        
-        if i.guild.voice_client.is_playing(): 
-            i.guild.voice_client.stop()
-            
-        i.guild.voice_client.play(player, after=lambda e: print(f'Player error: {e}') if e else None)
-        await i.followup.send(f"🎶 **{player.title}**")
-        
-    except Exception as e:
-        # ВЫВОДИМ ТОЧНУЮ ОШИБКУ В ЧАТ
-        error_msg = str(e)
-        if "Sign in to confirm" in error_msg:
-            await i.followup.send("⚠️ YouTube заблокировал доступ (требует вход). Попробуйте другую песню или перезалейте бота.")
-        elif "403" in error_msg:
-            await i.followup.send("⚠️ Ошибка 403 (Запрет от YouTube). Попробуйте позже.")
-        else:
-            await i.followup.send(f"❌ Ошибка загрузки: {error_msg}")
-        print(f"Play Error: {traceback.format_exc()}")
+    if not i.user.voice: return await i.followup.send("Войс!")
+    if not i.guild.voice_client: await i.user.voice.channel.connect()
+    try: p=await YTDLSource.from_url(query, loop=bot.loop, stream=True); i.guild.voice_client.play(p); await i.followup.send(f"🎶 **{p.title}**")
+    except: await i.followup.send("Ошибка")
 
 @bot.tree.command(name="top_russia", description="Топ 100")
 async def top_ru(i: discord.Interaction):
-    await slash_play(i, "Топ 100 русских песен 2024 микс")
+    if not await check_music_channel(i): return
+    await i.response.defer(); 
+    if not i.guild.voice_client: await i.user.voice.channel.connect()
+    try: p=await YTDLSource.from_url("Топ 100 русских песен 2024 микс", loop=bot.loop, stream=True); i.guild.voice_client.play(p); await i.followup.send(f"🇷🇺 **ТОП России**")
+    except: await i.followup.send("Ошибка")
 
 @tasks.loop(minutes=5)
 async def update_stats_loop():
