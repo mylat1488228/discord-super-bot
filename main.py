@@ -76,17 +76,10 @@ def update_config(guild_id, column, value):
     if cursor.fetchone() is None: cursor.execute("INSERT INTO configs (guild_id) VALUES (?)", (guild_id,))
     cursor.execute(f"UPDATE configs SET {column} = ? WHERE guild_id = ?", (value, guild_id)); conn.commit()
 
-# --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ПРАВ ---
+# --- ПРАВА ---
 def get_admin_perms(guild):
-    # Только для админов и бота
     return {
         guild.default_role: discord.PermissionOverwrite(read_messages=False),
-        guild.me: discord.PermissionOverwrite(read_messages=True)
-    }
-
-def get_public_perms(guild):
-    return {
-        guild.default_role: discord.PermissionOverwrite(read_messages=True),
         guild.me: discord.PermissionOverwrite(read_messages=True)
     }
 
@@ -221,6 +214,43 @@ class MarketSelectView(discord.ui.View):
     @discord.ui.button(label="Реклама", style=discord.ButtonStyle.secondary, emoji="📢", custom_id="m_ad_btn")
     async def ad(self, i, b): c=get_config(i.guild.id); (await i.response.send_modal(MarketModal("Реклама", c[12]))) if c and c[12] else await i.response.send_message("Не настроено", ephemeral=True)
 
+# --- МАГАЗИН (ПОКУПКА УСЛУГ) ---
+class ShopControlView(discord.ui.View):
+    def __init__(self): super().__init__(timeout=None)
+    @discord.ui.button(label="✅ Оплатил", style=discord.ButtonStyle.green)
+    async def paid(self, i, b): await i.response.send_message(f"{i.user.mention} оплатил! Ждите админа.", allowed_mentions=discord.AllowedMentions(users=True))
+    @discord.ui.button(label="🔒 Закрыть", style=discord.ButtonStyle.red)
+    async def close(self, i, b): 
+        if i.user.guild_permissions.administrator: await i.channel.delete()
+        else: await i.response.send_message("Только админ.", ephemeral=True)
+
+async def create_shop_ch(i, prod, price):
+    c = get_config(i.guild.id)
+    if c and c[19] == 0: return await i.response.send_message("⛔ Платежи выключены.", ephemeral=True)
+    cat = discord.utils.get(i.guild.categories, name="🛒 Заказы")
+    if not cat: cat = await i.guild.create_category("🛒 Заказы")
+    ow = {i.guild.default_role: discord.PermissionOverwrite(read_messages=False), i.user: discord.PermissionOverwrite(read_messages=True), i.guild.me: discord.PermissionOverwrite(read_messages=True)}
+    ch = await i.guild.create_text_channel(f"buy-{i.user.name}"[:20], category=cat, overwrites=ow)
+    emb = discord.Embed(title="🧾 СЧЕТ", color=discord.Color.green())
+    emb.add_field(name="Товар", value=prod); emb.add_field(name="Цена", value=price)
+    emb.add_field(name="Реквизиты", value="Карта: `0000 0000 0000 0000` (Сбер)", inline=False)
+    await ch.send(f"{i.user.mention}", embed=emb, view=ShopControlView())
+    await i.response.send_message(f"✅ Перейдите в {ch.mention}", ephemeral=True)
+
+class ShopAdsView(discord.ui.View):
+    def __init__(self): super().__init__(timeout=None)
+    @discord.ui.button(label="1 день (без пинга) - 50р", style=discord.ButtonStyle.secondary)
+    async def b1(self, i, b): await create_shop_ch(i, "Реклама 1д", "50 RUB")
+    @discord.ui.button(label="1 день (с пингом) - 100р", style=discord.ButtonStyle.primary)
+    async def b2(self, i, b): await create_shop_ch(i, "Реклама 1д + Ping", "100 RUB")
+
+class ShopCatSelect(discord.ui.View):
+    def __init__(self): super().__init__(timeout=None)
+    @discord.ui.select(placeholder="Выберите товар", options=[discord.SelectOption(label="Реклама", emoji="📢"), discord.SelectOption(label="Бот", emoji="🤖")])
+    async def sel(self, i, s):
+        if s.values[0] == "Реклама": await i.response.send_message("📢 Тарифы:", view=ShopAdsView(), ephemeral=True)
+        else: await create_shop_ch(i, s.values[0], "Договорная")
+
 # --- АДМИН ПАНЕЛЬ 2 (НАСТРОЙКИ) ---
 class AdminSettingsView(discord.ui.View):
     def __init__(self): super().__init__(timeout=None)
@@ -236,12 +266,42 @@ class AdminSettingsView(discord.ui.View):
         c=await i.guild.create_category("📊 СТАТИСТИКА", overwrites=ow, position=0)
         await i.guild.create_voice_channel("Загрузка...", category=c); await i.guild.create_voice_channel("Загрузка...", category=c)
         update_config(i.guild.id, "stats_category_id", c.id); await i.response.send_message("✅", ephemeral=True)
+    @discord.ui.button(label="📜 Создать Логи", style=discord.ButtonStyle.gray, row=3)
+    async def b_lg(self, i, b): ch=await i.guild.create_text_channel("global-logs", overwrites=get_admin_perms(i.guild)); update_config(i.guild.id, "global_log_channel_id", ch.id); await i.response.send_message(f"✅ {ch.mention}", ephemeral=True)
 
 # --- АДМИН ПАНЕЛЬ 1 (ГЛАВНАЯ) ---
 class AdminMainView(discord.ui.View):
     def __init__(self): super().__init__(timeout=None)
     
-    @discord.ui.button(label="🛠 Верификация (Создать)", style=discord.ButtonStyle.green, row=0)
+    # РЯД 0
+    @discord.ui.button(label="🎵 Создать Чат Музыки", style=discord.ButtonStyle.blurple, row=0)
+    async def b_mc(self, i, b): 
+        ch=await i.guild.create_text_channel("music-cmd"); update_config(i.guild.id, "music_text_channel_id", ch.id); await i.response.send_message(f"✅ {ch.mention}", ephemeral=True)
+        await ch.send("🎶 Пишите `/play` здесь!")
+
+    @discord.ui.button(label="🏪 Создать Каналы Рынков", style=discord.ButtonStyle.danger, row=0)
+    async def b_mk(self, i, b):
+        cat = await i.guild.create_category("РЫНОК")
+        ft = await i.guild.create_text_channel("рынок-ft", category=cat)
+        hw = await i.guild.create_text_channel("рынок-hw", category=cat)
+        ad = await i.guild.create_text_channel("реклама", category=cat)
+        cursor.execute("UPDATE configs SET market_ft_channel_id=?, market_hw_channel_id=?, market_ads_channel_id=? WHERE guild_id=?", (ft.id, hw.id, ad.id, i.guild.id)); conn.commit()
+        await i.response.send_message("✅ Каналы рынков созданы!", ephemeral=True)
+
+    # РЯД 1: Менюшки
+    @discord.ui.button(label="🏪 Меню Рынка", style=discord.ButtonStyle.secondary, row=1)
+    async def b_mm(self, i, b): ch=await i.guild.create_text_channel("create-ad"); await ch.send(embed=discord.Embed(title="🏪 Рынок", color=discord.Color.orange()), view=MarketSelectView()); await i.response.send_message("✅", ephemeral=True)
+
+    @discord.ui.button(label="🛒 Меню Магазина", style=discord.ButtonStyle.success, row=1)
+    async def b_shop(self, i, b): ch=await i.guild.create_text_channel("shop"); await ch.send(embed=discord.Embed(title="Магазин", color=discord.Color.blue()), view=ShopCatSelect()); await i.response.send_message("✅", ephemeral=True)
+
+    @discord.ui.button(label="🔊 Меню Приваток", style=discord.ButtonStyle.blurple, row=1)
+    async def b_pv(self, i, b):
+        c=await i.guild.create_category("Приватные Комнаты"); update_config(i.guild.id, "pvoice_category_id", c.id)
+        ch=await i.guild.create_text_channel("create-room"); await ch.send(embed=discord.Embed(title="🔊 Личный Войс", color=discord.Color.fuchsia()), view=PrivateVoiceView()); await i.response.send_message("✅", ephemeral=True)
+
+    # РЯД 2: Системы
+    @discord.ui.button(label="🛠 Верификация", style=discord.ButtonStyle.green, row=2)
     async def b_v(self, i, b):
         r=await i.guild.create_role(name="Verified", color=discord.Color.green(), permissions=discord.Permissions(view_channel=True, read_messages=True, send_messages=True, connect=True)); update_config(i.guild.id, "verify_role_id", r.id)
         ow={i.guild.default_role:discord.PermissionOverwrite(read_messages=True, send_messages=False, read_message_history=True), r:discord.PermissionOverwrite(read_messages=False), i.guild.me:discord.PermissionOverwrite(read_messages=True)}
@@ -249,27 +309,21 @@ class AdminMainView(discord.ui.View):
         try: await i.guild.default_role.edit(permissions=discord.Permissions(read_messages=False, view_channel=False))
         except: pass
 
-    @discord.ui.button(label="🎫 Тикеты (Создать)", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="🎫 Тикеты", style=discord.ButtonStyle.primary, row=2)
     async def b_t(self, i, b): 
         c=await i.guild.create_category("Support"); l=await i.guild.create_text_channel("ticket-logs", category=c); update_config(i.guild.id, "ticket_log_channel_id", l.id)
         update_config(i.guild.id, "ticket_category_id", c.id); ch=await i.guild.create_text_channel("tickets", category=c); await ch.send(embed=discord.Embed(title="Тикеты"), view=TicketStartView()); await i.response.send_message("✅", ephemeral=True)
 
-    @discord.ui.button(label="🔊 Меню Приваток", style=discord.ButtonStyle.blurple, row=1)
-    async def b_pv(self, i, b):
-        c=await i.guild.create_category("Приватные Комнаты"); update_config(i.guild.id, "pvoice_category_id", c.id)
-        ch=await i.guild.create_text_channel("create-room"); await ch.send(embed=discord.Embed(title="🔊 Личный Войс", color=discord.Color.fuchsia()), view=PrivateVoiceView()); await i.response.send_message("✅", ephemeral=True)
-
-    @discord.ui.button(label="🏪 Меню Рынка", style=discord.ButtonStyle.secondary, row=1)
-    async def b_mm(self, i, b): ch=await i.guild.create_text_channel("create-ad"); await ch.send(embed=discord.Embed(title="🏪 Рынок", color=discord.Color.orange()), view=MarketSelectView()); await i.response.send_message("✅", ephemeral=True)
-
-    @discord.ui.button(label="📜 Создать Логи (Скрытые)", style=discord.ButtonStyle.gray, row=2)
-    async def b_lg(self, i, b): 
-        # ПРАВА: ТОЛЬКО АДМИН ВИДИТ
-        ow = get_admin_perms(i.guild)
-        ch=await i.guild.create_text_channel("global-logs", overwrites=ow); update_config(i.guild.id, "global_log_channel_id", ch.id); await i.response.send_message(f"✅ {ch.mention}", ephemeral=True)
-
+    # РЯД 3: Навигация
     @discord.ui.button(label="⚙️ Настройки (Страница 2)", style=discord.ButtonStyle.danger, row=3)
     async def b_next(self, i, b): await i.response.send_message("Настройки:", view=AdminSettingsView(), ephemeral=True)
+    
+    @discord.ui.button(label="🔗 Соцсети", style=discord.ButtonStyle.secondary, row=3)
+    async def b_soc(self, i, b): await i.response.send_modal(SocialsModal())
+
+class SocialsModal(discord.ui.Modal, title="Настройка ссылок"):
+    yt = discord.ui.TextInput(label="YouTube", required=False); tg = discord.ui.TextInput(label="Telegram", required=False)
+    async def on_submit(self, i): cursor.execute("UPDATE configs SET social_yt=?, social_tg=? WHERE guild_id=?", (self.yt.value, self.tg.value, i.guild.id)); conn.commit(); await i.response.send_message("✅", ephemeral=True)
 
 class TicketStartView(discord.ui.View):
     def __init__(self): super().__init__(timeout=None)
@@ -339,7 +393,7 @@ async def on_ready():
     print(f'Logged in as {bot.user}')
     await bot.tree.sync()
     update_stats_loop.start()
-    bot.add_view(VerifyView()); bot.add_view(TicketStartView()); bot.add_view(TicketControlView()); bot.add_view(AdminMainView()); bot.add_view(AdminSettingsView()); bot.add_view(MarketSelectView()); bot.add_view(PrivateVoiceView())
+    bot.add_view(VerifyView()); bot.add_view(TicketStartView()); bot.add_view(TicketControlView()); bot.add_view(AdminMainView()); bot.add_view(AdminSettingsView()); bot.add_view(MarketSelectView()); bot.add_view(PrivateVoiceView()); bot.add_view(ShopCatSelect())
 
 # --- ЛОГИ ---
 @bot.event
