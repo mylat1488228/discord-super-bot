@@ -10,6 +10,7 @@ import os
 from PIL import Image, ImageDraw, ImageFont
 import io
 import aiohttp
+import traceback
 from mcstatus import JavaServer
 
 # --- КОНФИГУРАЦИЯ ---
@@ -17,7 +18,6 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 ADMINS = ["defaultpeople", "anyachkaaaaa"] 
 FUNTIME_IP = "play.funtime.su"
 HOLYWORLD_IP = "mc.holyworld.ru"
-SERVER_NAME = "Souls Visuals"
 
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -53,8 +53,7 @@ cursor.execute('''CREATE TABLE IF NOT EXISTS configs (
     social_tg TEXT,
     social_tt TEXT,
     social_twitch TEXT,
-    payments_enabled INTEGER DEFAULT 1,
-    antiraid_enabled INTEGER DEFAULT 1
+    payments_enabled INTEGER DEFAULT 1
 )''')
 cursor.execute('''CREATE TABLE IF NOT EXISTS tickets (
     channel_id INTEGER PRIMARY KEY,
@@ -79,61 +78,12 @@ def update_config(guild_id, column, value):
 
 # --- ЛОГЕР ---
 async def log_action(guild, title, desc, color=discord.Color.light_grey()):
-    conf = get_config(guild.id)
-    if conf and conf[15]: 
-        ch = guild.get_channel(conf[15])
-        if ch: await ch.send(embed=discord.Embed(title=title, description=desc, color=color, timestamp=datetime.datetime.now()))
-
-# --- СТАТИСТИКА (ИСПРАВЛЕННАЯ ФУНКЦИЯ) ---
-async def get_online(ip):
     try:
-        # Ставим тайм-аут 2 секунды, чтобы бот не вис
-        server = await JavaServer.async_lookup(ip)
-        status = await asyncio.wait_for(server.async_status(), timeout=2.0)
-        return status.players.online
-    except:
-        return "N/A"
-
-async def update_stats_for_guild(guild_id):
-    conf = get_config(guild_id)
-    if not conf or not conf[13]: return # 13 = stats_category_id
-    
-    guild = bot.get_guild(guild_id)
-    if not guild: return
-
-    cat = guild.get_channel(conf[13])
-    if not cat or not isinstance(cat, discord.CategoryChannel): return
-
-    # Получаем данные
-    ft_on = await get_online(FUNTIME_IP)
-    hw_on = await get_online(HOLYWORLD_IP)
-    
-    # Формируем названия
-    names = [
-        f"💎 {SERVER_NAME}",
-        f"👥 Людей: {guild.member_count}",
-        f"🧡 FT: {ft_on}",
-        f"💙 HW: {hw_on}"
-    ]
-
-    # Обновляем каналы (или создаем, если их мало)
-    channels = cat.voice_channels
-    for i, name in enumerate(names):
-        try:
-            if i < len(channels):
-                if channels[i].name != name:
-                    await channels[i].edit(name=name)
-            else:
-                await guild.create_voice_channel(name, category=cat)
-        except Exception as e:
-            print(f"Stats Error: {e}")
-
-@tasks.loop(minutes=5)
-async def update_stats_loop():
-    cursor.execute("SELECT guild_id FROM configs")
-    guilds = cursor.fetchall()
-    for row in guilds:
-        await update_stats_for_guild(row[0])
+        conf = get_config(guild.id)
+        if conf and conf[15]: # global_log
+            ch = guild.get_channel(conf[15])
+            if ch: await ch.send(embed=discord.Embed(title=title, description=desc, color=color, timestamp=datetime.datetime.now()))
+    except: pass
 
 # --- ГЕНЕРАТОР КАРТИНОК ---
 async def create_banner(member, title_text, bg_filename):
@@ -173,15 +123,18 @@ class YTDLSource(discord.PCMVolumeTransformer):
         filename = data['url'] if stream else ytdl.prepare_filename(data)
         return cls(discord.FFmpegPCMAudio(filename, **ffmpeg_options), data=data)
 
-# --- ПРИВАТНЫЕ ВОЙСЫ ---
+# --- ПРИВАТНЫЕ ВОЙСЫ (ИСПРАВЛЕНО) ---
 class PrivateVoiceControl(discord.ui.View):
     def __init__(self, vc): super().__init__(timeout=None); self.vc = vc
     @discord.ui.select(cls=discord.ui.UserSelect, placeholder="➕ Добавить людей", min_values=1, max_values=10, row=0)
     async def wu(self, i, s):
-        res = cursor.execute("SELECT owner_id FROM voice_channels WHERE voice_id = ?", (self.vc.id,)).fetchone()
-        if not res or res[0] != i.user.id: return await i.response.send_message("❌ Не владелец.", ephemeral=True)
-        for u in s.values: await self.vc.set_permissions(u, connect=True, view_channel=True)
-        await i.response.send_message(f"✅ Добавлены.", ephemeral=True)
+        try:
+            res = cursor.execute("SELECT owner_id FROM voice_channels WHERE voice_id = ?", (self.vc.id,)).fetchone()
+            if not res or res[0] != i.user.id: return await i.response.send_message("❌ Не владелец.", ephemeral=True)
+            for u in s.values: await self.vc.set_permissions(u, connect=True, view_channel=True)
+            await i.response.send_message(f"✅ Добавлены.", ephemeral=True)
+        except Exception as e: await i.response.send_message(f"Ошибка: {e}", ephemeral=True)
+
     @discord.ui.button(label="🔒 Закрыть", style=discord.ButtonStyle.red, row=1)
     async def l(self, i, b): await self.vc.set_permissions(i.guild.default_role, connect=False); await i.response.send_message("🔒", ephemeral=True)
     @discord.ui.button(label="🔓 Открыть", style=discord.ButtonStyle.green, row=1)
@@ -191,26 +144,34 @@ class PrivateVoiceCreateModal(discord.ui.Modal, title='Создать комна
     v_name = discord.ui.TextInput(label='Название', max_length=20)
     v_limit = discord.ui.TextInput(label='Лимит', placeholder='0 = безлимит', max_length=2, required=False)
     async def on_submit(self, i):
-        c = get_config(i.guild.id)
-        if not c or not c[14]: return await i.response.send_message("❌ Не настроено.", ephemeral=True)
-        cat = i.guild.get_channel(c[14])
-        try: lim = int(self.v_limit.value) if self.v_limit.value else 0
-        except: lim = 0
-        ow = {i.guild.default_role: discord.PermissionOverwrite(connect=False, view_channel=True), i.user: discord.PermissionOverwrite(connect=True, view_channel=True, manage_channels=True, move_members=True)}
-        vc = await i.guild.create_voice_channel(name=self.v_name.value, category=cat, user_limit=lim, overwrites=ow)
-        cursor.execute("INSERT INTO voice_channels (voice_id, owner_id) VALUES (?, ?)", (vc.id, i.user.id)); conn.commit()
-        if i.user.voice: await i.user.move_to(vc)
-        await i.response.send_message(embed=discord.Embed(title=f"⚙️ {self.v_name.value}", color=discord.Color.gold()), view=PrivateVoiceControl(vc), ephemeral=True)
+        try:
+            c = get_config(i.guild.id)
+            if not c or not c[14]: return await i.response.send_message("❌ Админ не настроил категорию приваток!", ephemeral=True)
+            cat = i.guild.get_channel(c[14])
+            if not cat: return await i.response.send_message("❌ Категория удалена. Перенастройте бота.", ephemeral=True)
+            
+            try: lim = int(self.v_limit.value) if self.v_limit.value else 0
+            except: lim = 0
+            
+            ow = {i.guild.default_role: discord.PermissionOverwrite(connect=False, view_channel=True), i.user: discord.PermissionOverwrite(connect=True, view_channel=True, manage_channels=True, move_members=True)}
+            vc = await i.guild.create_voice_channel(name=self.v_name.value, category=cat, user_limit=lim, overwrites=ow)
+            cursor.execute("INSERT INTO voice_channels (voice_id, owner_id) VALUES (?, ?)", (vc.id, i.user.id)); conn.commit()
+            if i.user.voice: await i.user.move_to(vc)
+            
+            await i.response.send_message(embed=discord.Embed(title=f"⚙️ {self.v_name.value}", color=discord.Color.gold()), view=PrivateVoiceControl(vc), ephemeral=True)
+        except Exception as e:
+            print(e)
+            await i.response.send_message("Ошибка создания. Проверьте права бота.", ephemeral=True)
 
 class PrivateVoiceView(discord.ui.View):
     def __init__(self): super().__init__(timeout=None)
-    @discord.ui.button(label="➕ Создать комнату", style=discord.ButtonStyle.blurple, custom_id="cpv")
+    @discord.ui.button(label="➕ Создать комнату", style=discord.ButtonStyle.blurple, custom_id="cpv_btn_new")
     async def cr(self, i, b): await i.response.send_modal(PrivateVoiceCreateModal())
 
 # --- ВЕРИФИКАЦИЯ ---
 class VerifyModal(discord.ui.Modal, title='Верификация'):
     code_input = discord.ui.TextInput(label='Введите код', style=discord.TextStyle.short)
-    def __init__(self, code, role_id): super().__init__(); self.generated_code = code; self.role_id = role_id; self.code_input.label = f"Код: {code}"
+    def __init__(self, code, role_id): super().__init__(); self.generated_code = code; self.role_id = role_id; self.code_input.label = f"Введите: {code}"
     async def on_submit(self, i):
         if self.code_input.value == self.generated_code:
             try: await i.user.add_roles(i.guild.get_role(self.role_id)); await i.response.send_message("✅ Успех!", ephemeral=True)
@@ -219,13 +180,16 @@ class VerifyModal(discord.ui.Modal, title='Верификация'):
 
 class VerifyView(discord.ui.View):
     def __init__(self): super().__init__(timeout=None)
-    @discord.ui.button(label="Пройти Верификацию", style=discord.ButtonStyle.green, custom_id="vp")
+    @discord.ui.button(label="Пройти Верификацию", style=discord.ButtonStyle.green, custom_id="vp_btn_new")
     async def v(self, i, b):
-        c=get_config(i.guild.id)
-        if not c or not c[1]: return await i.response.send_message("❌ Не настроено", ephemeral=True)
-        r=i.guild.get_role(c[1])
-        if r in i.user.roles: return await i.response.send_message("✅ Уже есть", ephemeral=True)
-        await i.response.send_modal(VerifyModal(str(random.randint(1000, 9999)), c[1]))
+        try:
+            c=get_config(i.guild.id)
+            if not c or not c[1]: return await i.response.send_message("❌ Роль не настроена", ephemeral=True)
+            r=i.guild.get_role(c[1])
+            if not r: return await i.response.send_message("❌ Роль удалена", ephemeral=True)
+            if r in i.user.roles: return await i.response.send_message("✅ Уже есть", ephemeral=True)
+            await i.response.send_modal(VerifyModal(str(random.randint(1000, 9999)), c[1]))
+        except Exception as e: await i.response.send_message(f"Error: {e}", ephemeral=True)
 
 # --- РЫНОК ---
 class MarketModal(discord.ui.Modal, title='Продажа'):
@@ -246,11 +210,11 @@ class MarketModal(discord.ui.Modal, title='Продажа'):
 
 class MarketSelectView(discord.ui.View):
     def __init__(self): super().__init__(timeout=None)
-    @discord.ui.button(label="FunTime", style=discord.ButtonStyle.danger, emoji="🧡", custom_id="m_ft")
+    @discord.ui.button(label="FunTime", style=discord.ButtonStyle.danger, emoji="🧡", custom_id="m_ft_btn")
     async def ft(self, i, b): c=get_config(i.guild.id); (await i.response.send_modal(MarketModal("Рынок FT", c[10]))) if c and c[10] else await i.response.send_message("Не настроено", ephemeral=True)
-    @discord.ui.button(label="HolyWorld", style=discord.ButtonStyle.primary, emoji="💙", custom_id="m_hw")
+    @discord.ui.button(label="HolyWorld", style=discord.ButtonStyle.primary, emoji="💙", custom_id="m_hw_btn")
     async def hw(self, i, b): c=get_config(i.guild.id); (await i.response.send_modal(MarketModal("Рынок HW", c[11]))) if c and c[11] else await i.response.send_message("Не настроено", ephemeral=True)
-    @discord.ui.button(label="Реклама", style=discord.ButtonStyle.secondary, emoji="📢", custom_id="m_ad")
+    @discord.ui.button(label="Реклама", style=discord.ButtonStyle.secondary, emoji="📢", custom_id="m_ad_btn")
     async def ad(self, i, b): c=get_config(i.guild.id); (await i.response.send_modal(MarketModal("Реклама", c[12]))) if c and c[12] else await i.response.send_message("Не настроено", ephemeral=True)
 
 # --- АДМИН ПАНЕЛЬ ---
@@ -260,7 +224,6 @@ class SocialsModal(discord.ui.Modal, title="Настройка ссылок"):
 
 class AdminSelect(discord.ui.View):
     def __init__(self): super().__init__(timeout=None)
-    # ROW 0
     @discord.ui.button(label="🎵 Создать Чат Музыки", style=discord.ButtonStyle.blurple, row=0)
     async def b_mc(self, i, b): ch=await i.guild.create_text_channel("music-cmd"); update_config(i.guild.id, "music_text_channel_id", ch.id); await i.response.send_message(f"✅ {ch.mention}", ephemeral=True)
     
@@ -290,15 +253,8 @@ class AdminSelect(discord.ui.View):
     async def b_st(self, i, b):
         ow={i.guild.default_role: discord.PermissionOverwrite(connect=False, view_channel=True)}
         c=await i.guild.create_category("📊 СТАТИСТИКА", overwrites=ow, position=0)
-        # Сразу создаем 4 канала
-        await i.guild.create_voice_channel(f"💎 {SERVER_NAME}", category=c)
-        await i.guild.create_voice_channel(f"👥 Загрузка...", category=c)
-        await i.guild.create_voice_channel(f"🧡 Загрузка...", category=c)
-        await i.guild.create_voice_channel(f"💙 Загрузка...", category=c)
-        update_config(i.guild.id, "stats_category_id", c.id)
-        await i.response.send_message("✅ Статистика создана (обновится через 5 сек)!", ephemeral=True)
-        # Запускаем обновление вручную
-        await update_stats_for_guild(i.guild.id)
+        await i.guild.create_voice_channel("Загрузка...", category=c); await i.guild.create_voice_channel("Загрузка...", category=c)
+        update_config(i.guild.id, "stats_category_id", c.id); await i.response.send_message("✅ Статистика создана!", ephemeral=True)
 
     @discord.ui.button(label="🛠 Верификация", style=discord.ButtonStyle.green, row=2)
     async def b_v(self, i, b):
@@ -318,20 +274,19 @@ class AdminSelect(discord.ui.View):
 
 class TicketStartView(discord.ui.View):
     def __init__(self): super().__init__(timeout=None)
-    @discord.ui.button(label="Тикет", style=discord.ButtonStyle.blurple, custom_id="ct")
+    @discord.ui.button(label="Тикет", style=discord.ButtonStyle.blurple, custom_id="ct_btn")
     async def c(self, i, b):
         c=get_config(i.guild.id); cat=i.guild.get_channel(c[3])
+        if not cat: return await i.response.send_message("Ошибка настроек", ephemeral=True)
         ch=await i.guild.create_text_channel(f"ticket-{random.randint(1,999)}", category=cat)
         cursor.execute("INSERT INTO tickets (channel_id, author_id) VALUES (?, ?)", (ch.id, i.user.id)); conn.commit()
-        # Добавляем права автору
         await ch.set_permissions(i.user, read_messages=True, send_messages=True)
-        # Логируем создание
         await log_action(i.guild, "🎫 Тикет создан", f"{i.user.mention} создал {ch.mention}")
-        await ch.send(f"{i.user.mention}", embed=discord.Embed(title="Тикет"), view=TicketControlView()); await i.response.send_message("✅", ephemeral=True)
+        await ch.send(f"{i.user.mention}", embed=discord.Embed(title="Тикет"), view=TicketControlView()); await i.response.send_message(f"✅ {ch.mention}", ephemeral=True)
 
 class TicketControlView(discord.ui.View):
     def __init__(self): super().__init__(timeout=None)
-    @discord.ui.button(label="Закрыть", style=discord.ButtonStyle.red, custom_id="clt")
+    @discord.ui.button(label="Закрыть", style=discord.ButtonStyle.red, custom_id="clt_btn")
     async def cl(self, i, b):
         c = get_config(i.guild.id)
         if c and c[4]: 
@@ -364,7 +319,22 @@ async def top_ru(i: discord.Interaction):
     try: p=await YTDLSource.from_url("Топ 100 русских песен 2024 микс", loop=bot.loop, stream=True); i.guild.voice_client.play(p); await i.followup.send(f"🇷🇺 **ТОП России**")
     except: await i.followup.send("Ошибка")
 
-# --- СИСТЕМА ---
+@tasks.loop(minutes=5)
+async def update_stats_loop():
+    cursor.execute("SELECT guild_id, stats_category_id FROM configs")
+    for row in cursor.fetchall():
+        try:
+            g = bot.get_guild(row[0]); cat = g.get_channel(row[1])
+            if not g or not cat: continue
+            try: st_ft = (await asyncio.wait_for((await JavaServer.async_lookup(FUNTIME_IP)).async_status(), 2.0)).players.online
+            except: st_ft = "Off"
+            try: st_hw = (await asyncio.wait_for((await JavaServer.async_lookup(HOLYWORLD_IP)).async_status(), 2.0)).players.online
+            except: st_hw = "Off"
+            names = [f"💎 {g.name}", f"👥 Людей: {g.member_count}", f"🧡 FT: {st_ft}", f"💙 HW: {st_hw}"]
+            for i, c in enumerate(cat.voice_channels):
+                if i < 4: await c.edit(name=names[i])
+        except: pass
+
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user}')
@@ -372,7 +342,7 @@ async def on_ready():
     update_stats_loop.start()
     bot.add_view(VerifyView()); bot.add_view(TicketStartView()); bot.add_view(TicketControlView()); bot.add_view(AdminSelect()); bot.add_view(MarketSelectView()); bot.add_view(PrivateVoiceView())
 
-# --- ГЛОБАЛЬНЫЕ ЛОГИ ---
+# --- ЛОГИ ---
 @bot.event
 async def on_message_delete(message):
     if message.author.bot: return
@@ -380,15 +350,13 @@ async def on_message_delete(message):
 
 @bot.event
 async def on_voice_state_update(member, before, after):
-    # Приватки
     if before.channel:
         cursor.execute("SELECT voice_id FROM voice_channels WHERE voice_id = ?", (before.channel.id,))
         if cursor.fetchone() and len(before.channel.members) == 0:
             await before.channel.delete(); cursor.execute("DELETE FROM voice_channels WHERE voice_id = ?", (before.channel.id,)); conn.commit()
-    # Логи
     if before.channel != after.channel:
-        d = f"-> {after.channel.name}" if after.channel else f"<- {before.channel.name}"
-        await log_action(member.guild, "🔊 Голос", f"**{member}** {d}", discord.Color.blue())
+        desc = f"-> {after.channel.name}" if after.channel else f"<- {before.channel.name}"
+        await log_action(member.guild, "🔊 Голос", f"**{member}** {desc}", discord.Color.blue())
 
 @bot.event
 async def on_member_join(member):
