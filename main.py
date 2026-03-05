@@ -76,7 +76,7 @@ def update_config(guild_id, column, value):
     if cursor.fetchone() is None: cursor.execute("INSERT INTO configs (guild_id) VALUES (?)", (guild_id,))
     cursor.execute(f"UPDATE configs SET {column} = ? WHERE guild_id = ?", (value, guild_id)); conn.commit()
 
-# --- ПРАВА ДОСТУПА ---
+# --- ПРАВА ---
 def get_admin_perms(guild):
     return {
         guild.default_role: discord.PermissionOverwrite(read_messages=False, view_channel=False),
@@ -103,7 +103,29 @@ async def log_action(guild, title, desc, color=discord.Color.light_grey()):
             if ch: await ch.send(embed=discord.Embed(title=title, description=desc, color=color, timestamp=datetime.datetime.now()))
     except: pass
 
-# --- МУЗЫКА (ОБНОВЛЕННЫЙ ПЛЕЕР) ---
+# --- ГЕНЕРАТОР КАРТИНОК ---
+async def create_banner(member, title_text, bg_filename):
+    try: background = Image.open(bg_filename).convert("RGBA")
+    except: background = Image.new("RGBA", (1000, 400), (20, 20, 60))
+    background = background.resize((1000, 400))
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(member.display_avatar.url) as resp: avatar_bytes = await resp.read()
+        avatar = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
+    except: avatar = Image.new("RGBA", (250, 250), (100, 100, 100))
+    avatar = avatar.resize((250, 250))
+    mask = Image.new("L", (250, 250), 0); draw_mask = ImageDraw.Draw(mask); draw_mask.ellipse((0, 0, 250, 250), fill=255)
+    stroke = Image.new("RGBA", (260, 260), (0, 0, 0, 0)); draw_stroke = ImageDraw.Draw(stroke); draw_stroke.ellipse((0, 0, 260, 260), fill=None, outline=(0, 191, 255), width=5)
+    output = background.copy(); output.paste(stroke, (50, 70), stroke); output.paste(avatar, (55, 75), mask)
+    draw = ImageDraw.Draw(output)
+    try: font_large = ImageFont.truetype("font.ttf", 80); font_small = ImageFont.truetype("font.ttf", 50)
+    except: font_large = ImageFont.load_default(); font_small = ImageFont.load_default()
+    draw.text((354, 104), title_text, fill="black", font=font_large); draw.text((354, 204), str(member), fill="black", font=font_small)
+    draw.text((350, 100), title_text, fill=(255, 255, 255), font=font_large); draw.text((350, 200), str(member), fill=(0, 255, 255), font=font_small)
+    buffer = io.BytesIO(); output.save(buffer, format="PNG"); buffer.seek(0)
+    return discord.File(buffer, filename="welcome.png")
+
+# --- МУЗЫКА (UNIVERSAL) ---
 yt_dlp.utils.bug_reports_message = lambda: ''
 
 ytdl_format_options = {
@@ -118,17 +140,11 @@ ytdl_format_options = {
     'no_warnings': True,
     'default_search': 'auto',
     'source_address': '0.0.0.0',
-    # ВАЖНО: Маскировка под браузер
-    'http_headers': {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-    }
+    # Маскировка под браузер (помогает от бана YouTube)
+    'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
 }
 
-ffmpeg_options = {
-    'options': '-vn',
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'
-}
-
+ffmpeg_options = {'options': '-vn', 'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'}
 ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
 
 class YTDLSource(discord.PCMVolumeTransformer):
@@ -139,19 +155,91 @@ class YTDLSource(discord.PCMVolumeTransformer):
         self.url = data.get('url')
 
     @classmethod
-    async def from_url(cls, url, *, loop=None, stream=False):
+    async def from_url(cls, url, *, loop=None, stream=False, platform="yt"):
         loop = loop or asyncio.get_event_loop()
         
-        if not url.startswith("http"):
-            url = f"ytsearch:{url}"
-            
-        data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream))
+        # Если это ссылка (http), yt-dlp сам поймет откуда она (ВК, Ютуб, Саундклауд)
+        if url.startswith("http"):
+            search_query = url
+        else:
+            # Если это текст, ищем на выбранной платформе
+            if platform == "sc":
+                search_query = f"scsearch:{url}" # Поиск в SoundCloud
+            else:
+                search_query = f"ytsearch:{url}" # Поиск в YouTube
+
+        data = await loop.run_in_executor(None, lambda: ytdl.extract_info(search_query, download=not stream))
         
         if 'entries' in data:
             data = data['entries'][0]
 
         filename = data['url'] if stream else ytdl.prepare_filename(data)
         return cls(discord.FFmpegPCMAudio(filename, **ffmpeg_options), data=data)
+
+# --- СЛЕШ КОМАНДЫ ДЛЯ МУЗЫКИ ---
+async def check_music_channel(interaction):
+    conf = get_config(interaction.guild.id)
+    if conf and conf[6] and interaction.channel.id != conf[6]:
+        chan = interaction.guild.get_channel(conf[6])
+        await interaction.response.send_message(f"🚫 Идите в: {chan.mention}", ephemeral=True); return False
+    return True
+
+@bot.tree.command(name="play", description="Включить музыку (YouTube, SoundCloud, VK)")
+@app_commands.describe(
+    query="Название или ссылка",
+    platform="Где искать (если не ссылка)"
+)
+@app_commands.choices(platform=[
+    app_commands.Choice(name="YouTube (Стандарт)", value="yt"),
+    app_commands.Choice(name="SoundCloud (Стабильно)", value="sc")
+])
+async def slash_play(i: discord.Interaction, query: str, platform: app_commands.Choice[str] = None):
+    if not await check_music_channel(i): return
+    await i.response.defer()
+    
+    if not i.user.voice:
+        return await i.followup.send("❌ Зайдите в голосовой канал!")
+        
+    # Подключение
+    try:
+        if not i.guild.voice_client: 
+            await i.user.voice.channel.connect()
+        else:
+            if i.guild.voice_client.channel.id != i.user.voice.channel.id:
+                await i.guild.voice_client.move_to(i.user.voice.channel)
+    except: pass
+
+    # Выбор платформы (по умолчанию YouTube)
+    search_plat = platform.value if platform else "yt"
+    platform_name = "SoundCloud" if search_plat == "sc" else "YouTube/Link"
+
+    try:
+        player = await YTDLSource.from_url(query, loop=bot.loop, stream=True, platform=search_plat)
+        
+        if i.guild.voice_client.is_playing(): 
+            i.guild.voice_client.stop()
+            
+        i.guild.voice_client.play(player)
+        await i.followup.send(f"🎶 Играет: **{player.title}**\n🔎 Источник: `{platform_name}`")
+        
+    except Exception as e:
+        await i.followup.send(f"❌ Ошибка воспроизведения. Попробуйте выбрать **SoundCloud** в меню команды.\nОшибка: {e}")
+
+@bot.tree.command(name="stop", description="Остановить музыку")
+async def slash_stop(i: discord.Interaction):
+    if i.guild.voice_client: await i.guild.voice_client.disconnect(); await i.response.send_message("⏹️")
+
+@bot.tree.command(name="top_russia", description="Топ 100 России")
+async def top_ru(i: discord.Interaction):
+    await slash_play(i, "Топ 100 русских песен 2024 микс", None)
+
+@bot.tree.command(name="top_world", description="Топ Мировой")
+async def top_wo(i: discord.Interaction):
+    await slash_play(i, "Top 100 global songs 2024 mix", None)
+
+@bot.tree.command(name="top_phonk", description="Топ Фонк")
+async def top_ph(i: discord.Interaction):
+    await slash_play(i, "Best Phonk Mix 2024", None)
 
 # --- ПРИВАТНЫЕ ВОЙСЫ ---
 class PrivateVoiceControl(discord.ui.View):
@@ -173,9 +261,9 @@ class PrivateVoiceCreateModal(discord.ui.Modal, title='Создать комна
     async def on_submit(self, i):
         try:
             c = get_config(i.guild.id)
-            if not c or not c[14]: return await i.response.send_message("❌ Админ не настроил категорию!", ephemeral=True)
+            if not c or not c[14]: return await i.response.send_message("❌ Админ не настроил категорию приваток!", ephemeral=True)
             cat = i.guild.get_channel(c[14])
-            if not cat: return await i.response.send_message("❌ Категория удалена.", ephemeral=True)
+            if not cat: return await i.response.send_message("❌ Категория удалена. Перенастройте бота.", ephemeral=True)
             try: lim = int(self.v_limit.value) if self.v_limit.value else 0
             except: lim = 0
             ow = {i.guild.default_role: discord.PermissionOverwrite(connect=False, view_channel=True), i.user: discord.PermissionOverwrite(connect=True, view_channel=True, manage_channels=True, move_members=True)}
@@ -282,8 +370,7 @@ class SocialsModal(discord.ui.Modal, title="Настройка ссылок"):
 class AdminSelect(discord.ui.View):
     def __init__(self): super().__init__(timeout=None)
     @discord.ui.button(label="🎵 Создать Чат Музыки", style=discord.ButtonStyle.blurple, row=0)
-    async def b_mc(self, i, b): 
-        ch=await i.guild.create_text_channel("music-cmd", overwrites=get_public_perms(i.guild)); update_config(i.guild.id, "music_text_channel_id", ch.id); await i.response.send_message(f"✅ {ch.mention}", ephemeral=True)
+    async def b_mc(self, i, b): ch=await i.guild.create_text_channel("music-cmd", overwrites=get_public_perms(i.guild)); update_config(i.guild.id, "music_text_channel_id", ch.id); await i.response.send_message(f"✅ {ch.mention}", ephemeral=True)
     
     @discord.ui.button(label="🏪 Создать Каналы Рынков", style=discord.ButtonStyle.danger, row=0)
     async def b_mk(self, i, b):
@@ -369,54 +456,6 @@ class TicketControlView(discord.ui.View):
             if l: await l.send(f"📕 Тикет {i.channel.name} закрыт пользователем {i.user.name}")
         await i.channel.delete()
 
-# --- СЛЕШ КОМАНДЫ ---
-async def check_music_channel(interaction):
-    conf = get_config(interaction.guild.id)
-    if conf and conf[6] and interaction.channel.id != conf[6]:
-        chan = interaction.guild.get_channel(conf[6])
-        await interaction.response.send_message(f"🚫 Идите в: {chan.mention}", ephemeral=True); return False
-    return True
-
-@bot.tree.command(name="play", description="Музыка")
-async def slash_play(i: discord.Interaction, query: str):
-    if not await check_music_channel(i): return
-    await i.response.defer()
-    if not i.user.voice: return await i.followup.send("Войс!")
-    if not i.guild.voice_client: await i.user.voice.channel.connect()
-    try: p=await YTDLSource.from_url(query, loop=bot.loop, stream=True); i.guild.voice_client.play(p); await i.followup.send(f"🎶 **{p.title}**")
-    except: await i.followup.send("Ошибка")
-
-@bot.tree.command(name="top_russia", description="Топ 100")
-async def top_ru(i: discord.Interaction):
-    if not await check_music_channel(i): return
-    await i.response.defer(); 
-    if not i.guild.voice_client: await i.user.voice.channel.connect()
-    try: p=await YTDLSource.from_url("Топ 100 русских песен 2024 микс", loop=bot.loop, stream=True); i.guild.voice_client.play(p); await i.followup.send(f"🇷🇺 **ТОП России**")
-    except: await i.followup.send("Ошибка")
-
-# --- ГЕНЕРАТОР КАРТИНОК ---
-async def create_banner(member, title_text, bg_filename):
-    try: background = Image.open(bg_filename).convert("RGBA")
-    except: background = Image.new("RGBA", (1000, 400), (20, 20, 60))
-    background = background.resize((1000, 400))
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(member.display_avatar.url) as resp: avatar_bytes = await resp.read()
-        avatar = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
-    except: avatar = Image.new("RGBA", (250, 250), (100, 100, 100))
-    avatar = avatar.resize((250, 250))
-    mask = Image.new("L", (250, 250), 0); draw_mask = ImageDraw.Draw(mask); draw_mask.ellipse((0, 0, 250, 250), fill=255)
-    stroke = Image.new("RGBA", (260, 260), (0, 0, 0, 0)); draw_stroke = ImageDraw.Draw(stroke); draw_stroke.ellipse((0, 0, 260, 260), fill=None, outline=(0, 191, 255), width=5)
-    output = background.copy(); output.paste(stroke, (50, 70), stroke); output.paste(avatar, (55, 75), mask)
-    draw = ImageDraw.Draw(output)
-    try: font_large = ImageFont.truetype("font.ttf", 80); font_small = ImageFont.truetype("font.ttf", 50)
-    except: font_large = ImageFont.load_default(); font_small = ImageFont.load_default()
-    draw.text((354, 104), title_text, fill="black", font=font_large); draw.text((354, 204), str(member), fill="black", font=font_small)
-    draw.text((350, 100), title_text, fill=(255, 255, 255), font=font_large); draw.text((350, 200), str(member), fill=(0, 255, 255), font=font_small)
-    buffer = io.BytesIO(); output.save(buffer, format="PNG"); buffer.seek(0)
-    return discord.File(buffer, filename="welcome.png")
-
-# --- СОБЫТИЯ ---
 @tasks.loop(minutes=5)
 async def update_stats_loop():
     cursor.execute("SELECT guild_id, stats_category_id FROM configs")
@@ -438,12 +477,13 @@ async def on_ready():
     print(f'Logged in as {bot.user}')
     await bot.tree.sync()
     update_stats_loop.start()
-    bot.add_view(VerifyView()); bot.add_view(TicketStartView()); bot.add_view(TicketControlView()); bot.add_view(AdminSelect()); bot.add_view(MarketSelectView()); bot.add_view(PrivateVoiceView()); bot.add_view(ShopCatSelect()); bot.add_view(AdminSettingsView())
+    bot.add_view(VerifyView()); bot.add_view(TicketStartView()); bot.add_view(TicketControlView()); bot.add_view(AdminSelect()); bot.add_view(MarketSelectView()); bot.add_view(PrivateVoiceView()); bot.add_view(ShopCatSelect())
 
-@bot.command()
-async def sync(ctx):
-    await bot.tree.sync()
-    await ctx.send("✅ Синхронизировано!")
+# --- ЛОГИ ---
+@bot.event
+async def on_message_delete(message):
+    if message.author.bot: return
+    await log_action(message.guild, "🗑 Удаление", f"**{message.author}**: {message.content}", discord.Color.red())
 
 @bot.event
 async def on_voice_state_update(member, before, after):
@@ -451,6 +491,9 @@ async def on_voice_state_update(member, before, after):
         cursor.execute("SELECT voice_id FROM voice_channels WHERE voice_id = ?", (before.channel.id,))
         if cursor.fetchone() and len(before.channel.members) == 0:
             await before.channel.delete(); cursor.execute("DELETE FROM voice_channels WHERE voice_id = ?", (before.channel.id,)); conn.commit()
+    if before.channel != after.channel:
+        desc = f"-> {after.channel.name}" if after.channel else f"<- {before.channel.name}"
+        await log_action(member.guild, "🔊 Голос", f"**{member}** {desc}", discord.Color.blue())
 
 @bot.event
 async def on_member_join(member):
