@@ -125,13 +125,10 @@ async def create_banner(member, title_text, bg_filename):
     buffer = io.BytesIO(); output.save(buffer, format="PNG"); buffer.seek(0)
     return discord.File(buffer, filename="welcome.png")
 
-# --- МУЗЫКА (ИСПРАВЛЕНА: SOUNDCLOUD ПО УМОЛЧАНИЮ) ---
+# --- МУЗЫКА (FIX) ---
 yt_dlp.utils.bug_reports_message = lambda: ''
-
-# Максимально агрессивные настройки против бана
 ytdl_format_options = {
     'format': 'bestaudio/best',
-    'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
     'restrictfilenames': True,
     'noplaylist': True,
     'nocheckcertificate': True,
@@ -140,20 +137,11 @@ ytdl_format_options = {
     'quiet': True,
     'no_warnings': True,
     'default_search': 'auto',
-    'source_address': '0.0.0.0', # IPv4
-    'cachedir': False, # Не кешировать, чтобы избежать ошибок
-    'http_headers': {
-        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0.3 Mobile/15E148 Safari/604.1',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-us,en;q=0.5',
-    }
+    'source_address': '0.0.0.0',
+    # User Agent
+    'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
 }
-
-ffmpeg_options = {
-    'options': '-vn',
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'
-}
-
+ffmpeg_options = {'options': '-vn', 'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'}
 ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
 
 class YTDLSource(discord.PCMVolumeTransformer):
@@ -166,28 +154,18 @@ class YTDLSource(discord.PCMVolumeTransformer):
     @classmethod
     async def from_url(cls, url, *, loop=None, stream=False):
         loop = loop or asyncio.get_event_loop()
-        
-        # ГЛАВНОЕ ИСПРАВЛЕНИЕ:
-        # Если это текст (не ссылка) -> Ищем на SoundCloud (он работает стабильно)
-        # Если это ссылка -> Пытаемся скачать как есть
-        
+        # ПРИНУДИТЕЛЬНЫЙ SOUNDCLOUD (Если это не прямая ссылка)
+        # Это лечит зависание на 99%
         if not url.startswith("http"):
-            search_query = f"scsearch:{url}" # scsearch = SoundCloud Search
-        else:
-            search_query = url
-
-        # Тайм-аут 15 секунд, чтобы бот не вис вечно
-        try:
-            data = await asyncio.wait_for(
-                loop.run_in_executor(None, lambda: ytdl.extract_info(search_query, download=not stream)),
-                timeout=15.0
-            )
-        except asyncio.TimeoutError:
-            raise Exception("Тайм-аут! Сервер музыки не ответил вовремя.")
+            url = f"scsearch:{url}" 
         
-        if 'entries' in data:
-            data = data['entries'][0]
-
+        # Тайм-аут 10 секунд
+        data = await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream)), 
+            timeout=10.0
+        )
+        
+        if 'entries' in data: data = data['entries'][0]
         filename = data['url'] if stream else ytdl.prepare_filename(data)
         return cls(discord.FFmpegPCMAudio(filename, **ffmpeg_options), data=data)
 
@@ -461,17 +439,28 @@ async def slash_play(i: discord.Interaction, query: str):
     if not await check_music_channel(i): return
     await i.response.defer()
     if not i.user.voice: return await i.followup.send("Войс!")
-    if not i.guild.voice_client: await i.user.voice.channel.connect()
-    try: p=await YTDLSource.from_url(query, loop=bot.loop, stream=True); i.guild.voice_client.play(p); await i.followup.send(f"🎶 **{p.title}**")
-    except: await i.followup.send("Ошибка (попробуйте название, а не ссылку)")
+    try:
+        if not i.guild.voice_client: await i.user.voice.channel.connect()
+    except: pass # Уже подключен
+    
+    try: 
+        # ПРИНУДИТЕЛЬНО ИСПОЛЬЗУЕМ 10s timeout И ОБЩУЮ ЛОГИКУ
+        player = await YTDLSource.from_url(query, loop=bot.loop, stream=True)
+        if i.guild.voice_client.is_playing(): i.guild.voice_client.stop()
+        i.guild.voice_client.play(player)
+        await i.followup.send(f"🎶 **{player.title}**")
+    except asyncio.TimeoutError:
+        await i.followup.send("⏳ Тайм-аут! Хостинг не смог загрузить трек.")
+    except Exception as e:
+        await i.followup.send(f"❌ Ошибка: {e}")
+
+@bot.tree.command(name="stop", description="Стоп")
+async def slash_stop(i: discord.Interaction):
+    if i.guild.voice_client: await i.guild.voice_client.disconnect(); await i.response.send_message("⏹️")
 
 @bot.tree.command(name="top_russia", description="Топ 100")
 async def top_ru(i: discord.Interaction):
-    if not await check_music_channel(i): return
-    await i.response.defer(); 
-    if not i.guild.voice_client: await i.user.voice.channel.connect()
-    try: p=await YTDLSource.from_url("Топ 100 русских песен 2024 микс", loop=bot.loop, stream=True); i.guild.voice_client.play(p); await i.followup.send(f"🇷🇺 **ТОП России**")
-    except: await i.followup.send("Ошибка")
+    await slash_play(i, "Топ 100 русских песен 2024 микс")
 
 @tasks.loop(minutes=5)
 async def update_stats_loop():
@@ -496,7 +485,6 @@ async def on_ready():
     update_stats_loop.start()
     bot.add_view(VerifyView()); bot.add_view(TicketStartView()); bot.add_view(TicketControlView()); bot.add_view(AdminSelect()); bot.add_view(MarketSelectView()); bot.add_view(PrivateVoiceView()); bot.add_view(ShopCatSelect()); bot.add_view(EventsView()); bot.add_view(AdminSettingsView())
 
-# --- ЛОГИ ---
 @bot.event
 async def on_message_delete(message):
     if message.author.bot: return
