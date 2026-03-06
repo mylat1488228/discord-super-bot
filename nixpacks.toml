@@ -1,5 +1,5 @@
 [phases.setup]
-nixPkgs = ["python310", "ffmpeg"]
+nixPkgs = ["python310", "ffmpeg", "libopus"]
 
 [phases.install]
 cmds = ["python3.10 -m pip install -r requirements.txt"]
