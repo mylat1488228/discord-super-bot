@@ -125,46 +125,19 @@ async def create_banner(member, title_text, bg_filename):
     buffer = io.BytesIO(); output.save(buffer, format="PNG"); buffer.seek(0)
     return discord.File(buffer, filename="welcome.png")
 
-# --- МУЗЫКА (FIX) ---
+# --- МУЗЫКА (ИСПРАВЛЕННАЯ) ---
 yt_dlp.utils.bug_reports_message = lambda: ''
-ytdl_format_options = {
-    'format': 'bestaudio/best',
-    'restrictfilenames': True,
-    'noplaylist': True,
-    'nocheckcertificate': True,
-    'ignoreerrors': False,
-    'logtostderr': False,
-    'quiet': True,
-    'no_warnings': True,
-    'default_search': 'auto',
-    'source_address': '0.0.0.0',
-    # User Agent
-    'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-}
+ytdl_format_options = {'format': 'bestaudio/best', 'restrictfilenames': True, 'noplaylist': True, 'nocheckcertificate': True, 'ignoreerrors': False, 'logtostderr': False, 'quiet': True, 'no_warnings': True, 'default_search': 'auto', 'source_address': '0.0.0.0', 'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}}
 ffmpeg_options = {'options': '-vn', 'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'}
 ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
 
 class YTDLSource(discord.PCMVolumeTransformer):
-    def __init__(self, source, *, data, volume=0.5):
-        super().__init__(source, volume)
-        self.data = data
-        self.title = data.get('title')
-        self.url = data.get('url')
-
+    def __init__(self, source, *, data, volume=0.5): super().__init__(source, volume); self.data = data; self.title = data.get('title'); self.url = data.get('url')
     @classmethod
     async def from_url(cls, url, *, loop=None, stream=False):
         loop = loop or asyncio.get_event_loop()
-        # ПРИНУДИТЕЛЬНЫЙ SOUNDCLOUD (Если это не прямая ссылка)
-        # Это лечит зависание на 99%
-        if not url.startswith("http"):
-            url = f"scsearch:{url}" 
-        
-        # Тайм-аут 10 секунд
-        data = await asyncio.wait_for(
-            loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream)), 
-            timeout=10.0
-        )
-        
+        if not url.startswith("http"): url = f"scsearch:{url}" # Ищем на SoundCloud
+        data = await asyncio.wait_for(loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream)), timeout=10.0)
         if 'entries' in data: data = data['entries'][0]
         filename = data['url'] if stream else ytdl.prepare_filename(data)
         return cls(discord.FFmpegPCMAudio(filename, **ffmpeg_options), data=data)
@@ -285,7 +258,7 @@ class ShopAdsView(discord.ui.View):
 
 class ShopCatSelect(discord.ui.View):
     def __init__(self): super().__init__(timeout=None)
-    @discord.ui.select(placeholder="Выберите товар", options=[discord.SelectOption(label="Реклама", emoji="📢"), discord.SelectOption(label="Бот", emoji="🤖")])
+    @discord.ui.select(placeholder="Выберите товар", custom_id="shop_sel_menu", options=[discord.SelectOption(label="Реклама", emoji="📢"), discord.SelectOption(label="Бот", emoji="🤖")])
     async def sel(self, i, s):
         if s.values[0] == "Реклама": await i.response.send_message("📢 Тарифы:", view=ShopAdsView(), ephemeral=True)
         else: await create_shop_ch(i, s.values[0], "Договорная")
@@ -441,22 +414,17 @@ async def slash_play(i: discord.Interaction, query: str):
     if not i.user.voice: return await i.followup.send("Войс!")
     try:
         if not i.guild.voice_client: await i.user.voice.channel.connect()
-    except: pass # Уже подключен
+    except: pass
     
     try: 
-        # ПРИНУДИТЕЛЬНО ИСПОЛЬЗУЕМ 10s timeout И ОБЩУЮ ЛОГИКУ
         player = await YTDLSource.from_url(query, loop=bot.loop, stream=True)
         if i.guild.voice_client.is_playing(): i.guild.voice_client.stop()
         i.guild.voice_client.play(player)
         await i.followup.send(f"🎶 **{player.title}**")
     except asyncio.TimeoutError:
-        await i.followup.send("⏳ Тайм-аут! Хостинг не смог загрузить трек.")
+        await i.followup.send("⏳ Тайм-аут загрузки.")
     except Exception as e:
         await i.followup.send(f"❌ Ошибка: {e}")
-
-@bot.tree.command(name="stop", description="Стоп")
-async def slash_stop(i: discord.Interaction):
-    if i.guild.voice_client: await i.guild.voice_client.disconnect(); await i.response.send_message("⏹️")
 
 @bot.tree.command(name="top_russia", description="Топ 100")
 async def top_ru(i: discord.Interaction):
@@ -483,8 +451,9 @@ async def on_ready():
     print(f'Logged in as {bot.user}')
     await bot.tree.sync()
     update_stats_loop.start()
-    bot.add_view(VerifyView()); bot.add_view(TicketStartView()); bot.add_view(TicketControlView()); bot.add_view(AdminSelect()); bot.add_view(MarketSelectView()); bot.add_view(PrivateVoiceView()); bot.add_view(ShopCatSelect()); bot.add_view(EventsView()); bot.add_view(AdminSettingsView())
+    bot.add_view(VerifyView()); bot.add_view(TicketStartView()); bot.add_view(TicketControlView()); bot.add_view(PrivateVoiceView()); bot.add_view(ShopCatSelect()); bot.add_view(EventsView()); bot.add_view(MarketSelectView())
 
+# --- ЛОГИ ---
 @bot.event
 async def on_message_delete(message):
     if message.author.bot: return
@@ -522,7 +491,7 @@ async def setup(ctx):
         ow = get_admin_perms(ctx.guild)
         cat = await ctx.guild.create_category("BOT SETTINGS", overwrites=ow)
         ch = await ctx.guild.create_text_channel("admin-panel", category=cat)
-        await ch.send(embed=discord.Embed(title="⚙️ Админ Панель", description="Главное меню"), view=AdminSelect())
+        await ch.send(embed=discord.Embed(title="⚙️ Админ Панель", description="Главное меню"), view=AdminMainView())
         await ctx.send(f"✅ {ch.mention}")
     except: await ctx.send("Ошибка прав")
 
@@ -541,7 +510,7 @@ async def reset(ctx):
 
 @bot.command()
 async def admin(ctx):
-    if ctx.author.guild_permissions.administrator: await ctx.send(embed=discord.Embed(title="⚙️ Админ Панель"), view=AdminSelect())
+    if ctx.author.guild_permissions.administrator: await ctx.send(embed=discord.Embed(title="⚙️ Админ Панель"), view=AdminMainView())
 
 @bot.command()
 async def set_welcome(ctx):
