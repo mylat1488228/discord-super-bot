@@ -15,7 +15,7 @@ from mcstatus import JavaServer
 
 # --- КОНФИГУРАЦИЯ ---
 TOKEN = os.getenv("DISCORD_TOKEN")
-ADMINS = ["defaultpeople", "anyachkaaaaa"] 
+ADMINS = ["grif228anki", "kunilus."] 
 FUNTIME_IP = "play.funtime.su"
 HOLYWORLD_IP = "mc.holyworld.ru"
 
