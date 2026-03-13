@@ -22,9 +22,9 @@ SERVER_NAME = "BENEZUELA"
 
 # ЦВЕТА И СТИЛЬ
 C_GOLD = 0xFFD700
-IMG_MARKET = "https://i.pinimg.com/originals/e4/26/70/e426702edf874b181aced1e2fa5c6cde.gif" # Рынок
-IMG_VOICE = "https://i.pinimg.com/originals/2b/26/5c/2b265c37253337b32d47485773224795.gif"  # Приватки
-IMG_VERIFY = "https://i.pinimg.com/originals/1c/54/f7/1c54f7b06d7723c21afc5035bf88a5ef.gif" # Вериф
+IMG_MARKET = "https://i.pinimg.com/originals/e4/26/70/e426702edf874b181aced1e2fa5c6cde.gif"
+IMG_VOICE = "https://i.pinimg.com/originals/2b/26/5c/2b265c37253337b32d47485773224795.gif"
+IMG_VERIFY = "https://i.pinimg.com/originals/1c/54/f7/1c54f7b06d7723c21afc5035bf88a5ef.gif"
 
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -83,10 +83,16 @@ def update_config(guild_id, column, value):
     cursor.execute(f"UPDATE configs SET {column} = ? WHERE guild_id = ?", (value, guild_id)); conn.commit()
 
 # --- УМНЫЙ ПОИСК КАНАЛОВ ---
-async def get_or_create_channel(guild, name, category=None, overwrites=None):
-    ch = discord.utils.get(guild.text_channels, name=name)
-    if not ch: ch = await guild.create_text_channel(name, category=category, overwrites=overwrites)
-    else: await ch.edit(overwrites=overwrites, category=category)
+async def get_or_create_channel(guild, name, category=None, overwrites=None, channel_type="text"):
+    if channel_type == "text":
+        ch = discord.utils.get(guild.text_channels, name=name)
+        if not ch: ch = await guild.create_text_channel(name, category=category, overwrites=overwrites)
+        else: 
+            if category: await ch.edit(category=category)
+            if overwrites: await ch.edit(overwrites=overwrites)
+    else:
+        ch = discord.utils.get(guild.categories, name=name)
+        if not ch: ch = await guild.create_category(name, overwrites=overwrites)
     return ch
 
 # --- ПРАВА ---
@@ -101,7 +107,7 @@ def get_write_perms(guild):
     if ver: ow[ver] = discord.PermissionOverwrite(view_channel=True, read_messages=True, send_messages=True, read_message_history=True, attach_files=True)
     return ow
 
-# --- ГЕНЕРАТОР КАРТИНОК (С АВАТАРКОЙ) ---
+# --- ГЕНЕРАТОР КАРТИНОК ---
 async def create_banner(member, title_text, bg_filename):
     try: background = Image.open(bg_filename).convert("RGBA")
     except: background = Image.new("RGBA", (1000, 400), (20, 20, 60))
@@ -116,10 +122,9 @@ async def create_banner(member, title_text, bg_filename):
     # КРУГЛАЯ АВАТАРКА
     mask = Image.new("L", (250, 250), 0); draw_mask = ImageDraw.Draw(mask); draw_mask.ellipse((0, 0, 250, 250), fill=255)
     
-    # ЦЕНТРИРОВАНИЕ
     W, H = background.size
     avatar_x = (W - 250) // 2
-    avatar_y = (H - 250) // 2 - 40 # Чуть выше центра
+    avatar_y = (H - 250) // 2 - 40 
     
     output = background.copy()
     output.paste(avatar, (avatar_x, avatar_y), mask)
@@ -131,7 +136,6 @@ async def create_banner(member, title_text, bg_filename):
     text = f"{title_text}\n{member.name}"
     _, _, w, h = draw.textbbox((0, 0), text, font=font)
     
-    # Текст под аватаркой
     text_x = (W - w) // 2
     text_y = avatar_y + 260
     
@@ -177,8 +181,8 @@ class PrivateVoiceCreateModal(discord.ui.Modal, title='Создать комна
     async def on_submit(self, i):
         try:
             c = get_config(i.guild.id)
-            if not c or not c[14]: return await i.response.send_message("❌ Не настроено.", ephemeral=True)
-            cat = i.guild.get_channel(c[14])
+            if not c or not c[13]: return await i.response.send_message("❌ Не настроено.", ephemeral=True)
+            cat = i.guild.get_channel(c[13])
             try: lim = int(self.v_limit.value) if self.v_limit.value else 0
             except: lim = 0
             ow = {i.guild.default_role: discord.PermissionOverwrite(connect=False, view_channel=True), i.user: discord.PermissionOverwrite(connect=True, view_channel=True, manage_channels=True, move_members=True), i.guild.me: discord.PermissionOverwrite(connect=True, view_channel=True, manage_channels=True, move_members=True)}
@@ -207,11 +211,13 @@ class VerifyView(discord.ui.View):
 
 # --- РЫНОК ---
 class MarketModal(discord.ui.Modal, title='Продажа'):
-    item_name = discord.ui.TextInput(label='Товар'); item_price = discord.ui.TextInput(label='Цена'); item_desc = discord.ui.TextInput(label='Описание', style=discord.TextStyle.paragraph); item_photo = discord.ui.TextInput(label='Фото', required=False)
+    item_name = discord.ui.TextInput(label='Товар')
+    item_price = discord.ui.TextInput(label='Цена')
+    item_desc = discord.ui.TextInput(label='Описание', style=discord.TextStyle.paragraph)
+    item_photo = discord.ui.TextInput(label='Фото (ссылка)', required=False)
     def __init__(self, m_type, c_id): super().__init__(); self.m_type=m_type; self.c_id=c_id
     async def on_submit(self, i):
         ch = i.guild.get_channel(self.c_id)
-        if not ch: return await i.response.send_message("Ошибка канала", ephemeral=True)
         col = discord.Color.orange() if "FT" in self.m_type else discord.Color.blue()
         emb = discord.Embed(title=f"🛒 {self.m_type}", color=col, timestamp=datetime.datetime.now())
         emb.set_author(name=i.user.display_name, icon_url=i.user.display_avatar.url)
@@ -229,30 +235,7 @@ class MarketSelectView(discord.ui.View):
 # --- АДМИН ПАНЕЛЬ ---
 class AdminSelect(discord.ui.View):
     def __init__(self): super().__init__(timeout=None)
-    @discord.ui.button(label="📁 Обновить Каналы", style=discord.ButtonStyle.success, row=0)
-    async def b_create_all(self, i, b):
-        await i.response.defer(ephemeral=True)
-        guild = i.guild
-        # Роль
-        c = get_config(guild.id)
-        if not c or not c[1]: 
-            r = await guild.create_role(name="Verified", color=discord.Color.green())
-            update_config(guild.id, "verify_role_id", r.id)
-        
-        # Основные каналы
-        cat_info = await get_or_create_channel(guild, "INFO", category=None, channel_type="cat")
-        np = await get_or_create_channel(guild, "ɴᴇᴡ-ᴘʟᴀʏᴇʀs", cat_info, get_write_perms(guild))
-        update_config(guild.id, "welcome_channel_id", np.id)
-        
-        # Рынок
-        cat_m = await get_or_create_channel(guild, "🛒 РЫНОК", channel_type="cat")
-        ft = await get_or_create_channel(guild, "🧡┃рынок-ft", cat_m, get_public_perms(guild))
-        hw = await get_or_create_channel(guild, "💙┃рынок-hw", cat_m, get_public_perms(guild))
-        update_config(guild.id, "market_ft_channel_id", ft.id)
-        update_config(guild.id, "market_hw_channel_id", hw.id)
-        
-        await i.followup.send("✅ Каналы обновлены!", ephemeral=True)
-
+    
     @discord.ui.button(label="🛠 Верификация", style=discord.ButtonStyle.green, row=1)
     async def b_v(self, i, b):
         ch = await get_or_create_channel(i.guild, "verify", overwrites=get_public_perms(i.guild))
@@ -281,16 +264,6 @@ class AdminSelect(discord.ui.View):
         ch = await get_or_create_channel(i.guild, "ᴍᴜsɪᴄ🎶", overwrites=get_write_perms(i.guild))
         update_config(i.guild.id, "music_text_channel_id", ch.id)
         await i.response.send_message(f"✅ {ch.mention}", ephemeral=True)
-
-# --- УМНЫЙ ПОИСК КАНАЛОВ (Вспомогательная функция) ---
-async def get_or_create_channel(guild, name, category=None, overwrites=None, channel_type="text"):
-    if channel_type == "text":
-        ch = discord.utils.get(guild.text_channels, name=name)
-        if not ch: ch = await guild.create_text_channel(name, category=category, overwrites=overwrites)
-    else:
-        ch = discord.utils.get(guild.categories, name=name)
-        if not ch: ch = await guild.create_category(name, overwrites=overwrites)
-    return ch
 
 # --- СЛЕШ КОМАНДЫ ---
 async def check_music_channel(interaction):
@@ -347,9 +320,18 @@ async def on_member_remove(member):
 @bot.command()
 async def setup(ctx):
     if not ctx.guild.me.guild_permissions.administrator: return await ctx.send("❌ Дайте мне права АДМИНИСТРАТОРА!")
-    ch = await get_or_create_channel(ctx.guild, "admin-panel", await get_or_create_channel(ctx.guild, "BOT SETTINGS", channel_type="cat"))
-    await ch.purge(limit=5); await ch.send(embed=discord.Embed(title="⚙️ Админ Панель", description="Главное меню"), view=AdminSelect())
-    await ctx.send(f"✅ {ch.mention}")
+    try:
+        # УМНЫЙ SETUP: НЕ ДУБЛИРУЕТ ПАНЕЛЬ
+        cat = discord.utils.get(ctx.guild.categories, name="BOT SETTINGS")
+        if not cat: cat = await ctx.guild.create_category("BOT SETTINGS")
+        
+        ch = discord.utils.get(ctx.guild.text_channels, name="admin-panel")
+        if not ch: ch = await ctx.guild.create_text_channel("admin-panel", category=cat)
+        
+        await ch.purge(limit=5)
+        await ch.send(embed=discord.Embed(title="⚙️ Админ Панель", description="Главное меню"), view=AdminSelect())
+        await ctx.send(f"✅ Панель готова: {ch.mention}")
+    except Exception as e: await ctx.send(f"Ошибка: {e}")
 
 @bot.command()
 async def reset(ctx):
