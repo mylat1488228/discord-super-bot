@@ -75,24 +75,21 @@ def update_config(guild_id, column, value):
     if cursor.fetchone() is None: cursor.execute("INSERT INTO configs (guild_id) VALUES (?)", (guild_id,))
     cursor.execute(f"UPDATE configs SET {column} = ? WHERE guild_id = ?", (value, guild_id)); conn.commit()
 
-# --- ПРАВА ---
-def get_admin_perms(guild):
-    return {
-        guild.default_role: discord.PermissionOverwrite(read_messages=False, view_channel=False),
-        guild.me: discord.PermissionOverwrite(read_messages=True, view_channel=True)
-    }
+# --- СИСТЕМА ПРАВ (ИСПРАВЛЕННАЯ) ---
 
-def get_public_perms(guild):
+# 1. Права для канала ВЕРИФИКАЦИИ (То, чего не хватало)
+def get_newbie_perms(guild):
     return {
         guild.default_role: discord.PermissionOverwrite(
-            view_channel=True,
-            read_messages=True,
-            read_message_history=True,
+            view_channel=True, 
+            read_messages=True, 
+            read_message_history=True, # Важно для кнопок
             send_messages=False
         ),
-        guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, view_channel=True)
+        guild.me: discord.PermissionOverwrite(view_channel=True, read_messages=True, send_messages=True)
     }
 
+# 2. Каналы, где можно ПИСАТЬ (New Players, Chat, etc.)
 def get_write_perms(guild):
     c = get_config(guild.id)
     verified = guild.get_role(c[1]) if c and c[1] else None
@@ -105,12 +102,13 @@ def get_write_perms(guild):
         overwrites[verified] = discord.PermissionOverwrite(
             view_channel=True, 
             read_messages=True, 
-            send_messages=True,
+            send_messages=True, 
             read_message_history=True,
             attach_files=True
         )
     return overwrites
 
+# 3. Каналы ТОЛЬКО ДЛЯ ЧТЕНИЯ (Rules, News)
 def get_read_only_perms(guild):
     c = get_config(guild.id)
     verified = guild.get_role(c[1]) if c and c[1] else None
@@ -123,12 +121,13 @@ def get_read_only_perms(guild):
         overwrites[verified] = discord.PermissionOverwrite(
             view_channel=True, 
             read_messages=True, 
-            send_messages=False,
+            send_messages=False, 
             read_message_history=True,
             add_reactions=True
         )
     return overwrites
 
+# 4. Голосовые каналы
 def get_voice_perms(guild):
     c = get_config(guild.id)
     verified = guild.get_role(c[1]) if c and c[1] else None
@@ -145,6 +144,13 @@ def get_voice_perms(guild):
             stream=True
         )
     return overwrites
+
+# 5. Админские (Логи)
+def get_admin_perms(guild):
+    return {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        guild.me: discord.PermissionOverwrite(view_channel=True, read_messages=True)
+    }
 
 # --- ЛОГЕР ---
 async def log_action(guild, title, desc, color=discord.Color.light_grey()):
@@ -238,7 +244,7 @@ class VerifyModal(discord.ui.Modal, title='Верификация'):
     async def on_submit(self, i):
         if self.code_input.value == self.generated_code:
             try: await i.user.add_roles(i.guild.get_role(self.role_id)); await i.response.send_message("✅ Успех!", ephemeral=True)
-            except: await i.response.send_message("❌ Ошибка прав", ephemeral=True)
+            except: await i.response.send_message("❌ Ошибка прав. Поднимите роль бота выше роли Verified.", ephemeral=True)
         else: await i.response.send_message("❌ Неверно", ephemeral=True)
 
 class VerifyView(discord.ui.View):
@@ -277,9 +283,11 @@ class MarketSelectView(discord.ui.View):
     async def hw(self, i, b): c=get_config(i.guild.id); (await i.response.send_modal(MarketModal("Рынок HW", c[11]))) if c and c[11] else await i.response.send_message("Не настроено", ephemeral=True)
 
 # --- АДМИН ПАНЕЛЬ ---
-class SocialsModal(discord.ui.Modal, title="Настройка ссылок"):
-    yt = discord.ui.TextInput(label="YouTube", required=False); tg = discord.ui.TextInput(label="Telegram", required=False)
-    async def on_submit(self, i): cursor.execute("UPDATE configs SET social_yt=?, social_tg=? WHERE guild_id=?", (self.yt.value, self.tg.value, i.guild.id)); conn.commit(); await i.response.send_message("✅", ephemeral=True)
+class SocialsModal(discord.ui.Modal, title="Настройки"):
+    yt_id = discord.ui.TextInput(label="YouTube Channel ID", required=False)
+    async def on_submit(self, i): 
+        cursor.execute("UPDATE configs SET social_yt_id=? WHERE guild_id=?", (self.yt_id.value, i.guild.id)); conn.commit()
+        await i.response.send_message("✅ ID сохранен!", ephemeral=True)
 
 class AdminSelect(discord.ui.View):
     def __init__(self): super().__init__(timeout=None)
@@ -347,7 +355,6 @@ class AdminSelect(discord.ui.View):
 
     @discord.ui.button(label="🛠 Верификация", style=discord.ButtonStyle.green, row=4)
     async def b_v(self, i, b):
-        # ИСПРАВЛЕННАЯ ВЕРИФИКАЦИЯ
         await i.response.send_message("⚙️ Создаю...", ephemeral=True)
         guild = i.guild
         try:
@@ -436,26 +443,41 @@ async def top_ru(i: discord.Interaction):
     await slash_play(i, "Топ 100 русских песен 2024 микс")
 
 @tasks.loop(minutes=5)
-async def update_stats_loop():
-    cursor.execute("SELECT guild_id, stats_category_id FROM configs")
+async def tasks_loop():
+    cursor.execute("SELECT guild_id, stats_category_id, social_yt_id, media_channel_id, last_video_id FROM configs")
     for row in cursor.fetchall():
-        try:
-            g = bot.get_guild(row[0]); cat = g.get_channel(row[1])
-            if not g or not cat: continue
-            try: st_ft = (await asyncio.wait_for((await JavaServer.async_lookup(FUNTIME_IP)).async_status(), 2.0)).players.online
-            except: st_ft = "Off"
-            try: st_hw = (await asyncio.wait_for((await JavaServer.async_lookup(HOLYWORLD_IP)).async_status(), 2.0)).players.online
-            except: st_hw = "Off"
-            names = [f"💎 Souls Visuals", f"👥 Людей: {g.member_count}", f"🧡 FT: {st_ft}", f"💙 HW: {st_hw}"]
-            for i, c in enumerate(cat.voice_channels):
-                if i < 4: await c.edit(name=names[i])
-        except: pass
+        guild = bot.get_guild(row[0])
+        if not guild: continue
+
+        # 1. Stats
+        if row[1]:
+            try:
+                cat = guild.get_channel(row[1])
+                st_ft = (await asyncio.wait_for((await JavaServer.async_lookup(FUNTIME_IP)).async_status(), 2.0)).players.online
+                st_hw = (await asyncio.wait_for((await JavaServer.async_lookup(HOLYWORLD_IP)).async_status(), 2.0)).players.online
+                names = [f"💎 Souls Visuals", f"👥 Людей: {guild.member_count}", f"🧡 FT: {st_ft}", f"💙 HW: {st_hw}"]
+                for i, c in enumerate(cat.voice_channels):
+                    if i < 4: await c.edit(name=names[i])
+            except: pass
+
+        # 2. YouTube
+        if row[2] and row[3]:
+            try:
+                feed = feedparser.parse(f"https://www.youtube.com/feeds/videos.xml?channel_id={row[2]}")
+                if feed.entries:
+                    latest = feed.entries[0]
+                    if latest.yt_videoid != row[4]:
+                        ch = guild.get_channel(row[3])
+                        await ch.send(f"🎥 **Новое видео!**\n{latest.title}\n{latest.link}")
+                        cursor.execute("UPDATE configs SET last_video_id=? WHERE guild_id=?", (latest.yt_videoid, row[0]))
+                        conn.commit()
+            except: pass
 
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user}')
     await bot.tree.sync()
-    update_stats_loop.start()
+    tasks_loop.start()
     bot.add_view(VerifyView()); bot.add_view(TicketStartView()); bot.add_view(TicketControlView()); bot.add_view(AdminSelect()); bot.add_view(MarketSelectView()); bot.add_view(PrivateVoiceView()); bot.add_view(ContestJoinView())
 
 @bot.event
@@ -474,6 +496,13 @@ async def on_member_join(member):
             embed = discord.Embed(title=f"Добро пожаловать, {member.name}!", description=f"Рады видеть тебя на сервере **{member.guild.name}**! 🎉\nНе забудь прочитать правила.", color=discord.Color.gold())
             embed.set_thumbnail(url=member.display_avatar.url)
             await ch.send(f"{member.mention}", embed=embed)
+
+@bot.event
+async def on_member_remove(member):
+    c=get_config(member.guild.id)
+    if c and c[9]: 
+        ch=member.guild.get_channel(c[9])
+        if ch: await ch.send(f"Пока, {member.name}...", delete_after=10)
 
 @bot.command()
 async def setup(ctx):
@@ -499,5 +528,9 @@ async def admin(ctx):
 @bot.command()
 async def set_welcome(ctx):
     if ctx.author.guild_permissions.administrator: update_config(ctx.guild.id, "welcome_channel_id", ctx.channel.id); await ctx.send("✅")
+
+@bot.command()
+async def set_leave(ctx):
+    if ctx.author.guild_permissions.administrator: update_config(ctx.guild.id, "leave_channel_id", ctx.channel.id); await ctx.send("✅")
 
 bot.run(TOKEN)
