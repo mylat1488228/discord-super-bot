@@ -15,7 +15,7 @@ from mcstatus import JavaServer
 
 # --- КОНФИГУРАЦИЯ ---
 TOKEN = os.getenv("DISCORD_TOKEN")
-ADMINS = ["kunilus.", "grif228anki"] 
+ADMINS = ["defaultpeople", "anyachkaaaaa"] 
 FUNTIME_IP = "play.funtime.su"
 HOLYWORLD_IP = "mc.holyworld.ru"
 
@@ -75,7 +75,24 @@ def update_config(guild_id, column, value):
     if cursor.fetchone() is None: cursor.execute("INSERT INTO configs (guild_id) VALUES (?)", (guild_id,))
     cursor.execute(f"UPDATE configs SET {column} = ? WHERE guild_id = ?", (value, guild_id)); conn.commit()
 
-# --- ПРАВА ДОСТУПА ---
+# --- ПРАВА ---
+def get_admin_perms(guild):
+    return {
+        guild.default_role: discord.PermissionOverwrite(read_messages=False, view_channel=False),
+        guild.me: discord.PermissionOverwrite(read_messages=True, view_channel=True)
+    }
+
+def get_public_perms(guild):
+    return {
+        guild.default_role: discord.PermissionOverwrite(
+            view_channel=True,
+            read_messages=True,
+            read_message_history=True,
+            send_messages=False
+        ),
+        guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, view_channel=True)
+    }
+
 def get_write_perms(guild):
     c = get_config(guild.id)
     verified = guild.get_role(c[1]) if c and c[1] else None
@@ -129,11 +146,14 @@ def get_voice_perms(guild):
         )
     return overwrites
 
-def get_newbie_perms(guild):
-    return {
-        guild.default_role: discord.PermissionOverwrite(view_channel=True, read_messages=True, read_message_history=True, send_messages=False),
-        guild.me: discord.PermissionOverwrite(view_channel=True, read_messages=True, send_messages=True)
-    }
+# --- ЛОГЕР ---
+async def log_action(guild, title, desc, color=discord.Color.light_grey()):
+    try:
+        conf = get_config(guild.id)
+        if conf and conf[15]: 
+            ch = guild.get_channel(conf[15])
+            if ch: await ch.send(embed=discord.Embed(title=title, description=desc, color=color, timestamp=datetime.datetime.now()))
+    except: pass
 
 # --- ГЕНЕРАТОР КАРТИНОК ---
 async def create_banner(member, title_text, bg_filename):
@@ -194,22 +214,16 @@ class PrivateVoiceCreateModal(discord.ui.Modal, title='Создать комна
     async def on_submit(self, i):
         try:
             c = get_config(i.guild.id)
-            if not c or not c[13]: return await i.response.send_message("❌ Админ не нажал кнопку создания меню приваток!", ephemeral=True)
-            cat = i.guild.get_channel(c[13])
+            if not c or not c[14]: return await i.response.send_message("❌ Админ не настроил категорию приваток!", ephemeral=True)
+            cat = i.guild.get_channel(c[14])
+            if not cat: return await i.response.send_message("❌ Категория удалена. Перенастройте бота.", ephemeral=True)
             try: lim = int(self.v_limit.value) if self.v_limit.value else 0
             except: lim = 0
-            
-            # ПРАВА: БОТ ПОЛУЧАЕТ ПОЛНЫЙ ДОСТУП
-            ow = {
-                i.guild.default_role: discord.PermissionOverwrite(connect=False, view_channel=True),
-                i.user: discord.PermissionOverwrite(connect=True, view_channel=True, manage_channels=True, move_members=True),
-                i.guild.me: discord.PermissionOverwrite(connect=True, view_channel=True, manage_channels=True, move_members=True)
-            }
-            
+            ow = {i.guild.default_role: discord.PermissionOverwrite(connect=False, view_channel=True), i.user: discord.PermissionOverwrite(connect=True, view_channel=True, manage_channels=True, move_members=True), i.guild.me: discord.PermissionOverwrite(connect=True, view_channel=True, manage_channels=True, move_members=True)}
             vc = await i.guild.create_voice_channel(name=self.v_name.value, category=cat, user_limit=lim, overwrites=ow)
             cursor.execute("INSERT INTO voice_channels (voice_id, owner_id) VALUES (?, ?)", (vc.id, i.user.id)); conn.commit()
             if i.user.voice: await i.user.move_to(vc)
-            await i.response.send_message(embed=discord.Embed(title=f"🔊 {self.v_name.value}", color=discord.Color.gold()), view=PrivateVoiceControl(vc), ephemeral=True)
+            await i.response.send_message(embed=discord.Embed(title=f"⚙️ {self.v_name.value}", color=discord.Color.gold()), view=PrivateVoiceControl(vc), ephemeral=True)
         except Exception as e: await i.response.send_message(f"Ошибка: {e}", ephemeral=True)
 
 class PrivateVoiceView(discord.ui.View):
@@ -224,7 +238,7 @@ class VerifyModal(discord.ui.Modal, title='Верификация'):
     async def on_submit(self, i):
         if self.code_input.value == self.generated_code:
             try: await i.user.add_roles(i.guild.get_role(self.role_id)); await i.response.send_message("✅ Успех!", ephemeral=True)
-            except: await i.response.send_message("❌ Ошибка прав. Поднимите роль бота выше роли Verified.", ephemeral=True)
+            except: await i.response.send_message("❌ Ошибка прав", ephemeral=True)
         else: await i.response.send_message("❌ Неверно", ephemeral=True)
 
 class VerifyView(discord.ui.View):
@@ -263,42 +277,36 @@ class MarketSelectView(discord.ui.View):
     async def hw(self, i, b): c=get_config(i.guild.id); (await i.response.send_modal(MarketModal("Рынок HW", c[11]))) if c and c[11] else await i.response.send_message("Не настроено", ephemeral=True)
 
 # --- АДМИН ПАНЕЛЬ ---
-class SocialsModal(discord.ui.Modal, title="Настройки"):
-    yt_id = discord.ui.TextInput(label="YouTube Channel ID", required=False)
-    async def on_submit(self, i): 
-        cursor.execute("UPDATE configs SET social_yt_id=? WHERE guild_id=?", (self.yt_id.value, i.guild.id)); conn.commit()
-        await i.response.send_message("✅ ID сохранен!", ephemeral=True)
+class SocialsModal(discord.ui.Modal, title="Настройка ссылок"):
+    yt = discord.ui.TextInput(label="YouTube", required=False); tg = discord.ui.TextInput(label="Telegram", required=False)
+    async def on_submit(self, i): cursor.execute("UPDATE configs SET social_yt=?, social_tg=? WHERE guild_id=?", (self.yt.value, self.tg.value, i.guild.id)); conn.commit(); await i.response.send_message("✅", ephemeral=True)
 
 class AdminSelect(discord.ui.View):
     def __init__(self): super().__init__(timeout=None)
     
-    # 0. КАНАЛЫ (ПРАВА НАСТРОЕНЫ)
     @discord.ui.button(label="📁 Создать Основные Каналы", style=discord.ButtonStyle.success, row=0)
     async def b_create_all(self, i, b):
         await i.response.defer(ephemeral=True)
         guild = i.guild
-        write_perms = get_write_perms(guild)
-        read_perms = get_read_only_perms(guild)
-        voice_perms = get_voice_perms(guild)
-
-        # Категории
+        # Создаем роль Verified, если нет
+        c = get_config(guild.id)
+        if not c or not c[1]:
+             r = await guild.create_role(name="Verified", color=discord.Color.green())
+             update_config(guild.id, "verify_role_id", r.id)
+        
+        wp = get_write_perms(guild); rp = get_read_only_perms(guild); vp = get_voice_perms(guild)
         cat_info = await guild.create_category("INFO")
         cat_voice = await guild.create_category("VOICES")
         
-        # Текстовые (Read Only)
-        await guild.create_text_channel("ʀᴜʟᴇ📜", category=cat_info, overwrites=read_perms)
-        await guild.create_text_channel("ᴀɴɴᴏᴜɴᴄᴇᴍᴇɴᴛ📒", category=cat_info, overwrites=read_perms)
-        await guild.create_text_channel("ᴘᴀʀᴛɴᴇʀs🤝", category=cat_info, overwrites=read_perms)
+        await guild.create_text_channel("ʀᴜʟᴇ📜", category=cat_info, overwrites=rp)
+        await guild.create_text_channel("ᴀɴɴᴏᴜɴᴄᴇᴍᴇɴᴛ📒", category=cat_info, overwrites=rp)
+        await guild.create_text_channel("ᴘᴀʀᴛɴᴇʀs🤝", category=cat_info, overwrites=rp)
         
-        # Текстовые (Write)
-        np = await guild.create_text_channel("ɴᴇᴡ-ᴘʟᴀʏᴇʀs", category=cat_info, overwrites=write_perms)
-        update_config(guild.id, "welcome_channel_id", np.id) # Авто-настройка приветствий
-        await guild.create_text_channel("ᴄᴏᴍᴍᴜɴɪᴄᴀᴛɪᴏɴ📕", category=cat_info, overwrites=write_perms)
+        np = await guild.create_text_channel("ɴᴇᴡ-ᴘʟᴀʏᴇʀs", category=cat_info, overwrites=wp)
+        update_config(guild.id, "welcome_channel_id", np.id)
         
-        # Голосовые
-        for x in range(1, 4):
-            await guild.create_voice_channel(f"ᴠᴏɪsᴇs {x}🍀", category=cat_voice, overwrites=voice_perms)
-            
+        await guild.create_text_channel("ᴄᴏᴍᴍᴜɴɪᴄᴀᴛɪᴏɴ📕", category=cat_info, overwrites=wp)
+        for x in range(1, 4): await guild.create_voice_channel(f"ᴠᴏɪsᴇs {x}🍀", category=cat_voice, overwrites=vp)
         await i.followup.send("✅ Все основные каналы созданы и настроены!", ephemeral=True)
 
     @discord.ui.button(label="🎵 Создать Чат Музыки", style=discord.ButtonStyle.blurple, row=1)
@@ -310,7 +318,6 @@ class AdminSelect(discord.ui.View):
     @discord.ui.button(label="🎉 Создать Конкурсы", style=discord.ButtonStyle.success, row=1)
     async def b_cn(self, i, b): ch=await i.guild.create_text_channel("🎉┃конкурсы", overwrites=get_read_only_perms(i.guild)); update_config(i.guild.id, "contest_channel_id", ch.id); await i.response.send_message(f"✅ {ch.mention}", ephemeral=True)
 
-    # 1. МЕНЮ
     @discord.ui.button(label="🔊 Меню Приваток", style=discord.ButtonStyle.secondary, row=2)
     async def b_pv(self, i, b):
         c=await i.guild.create_category("🔊 Приватные Комнаты"); update_config(i.guild.id, "pvoice_category_id", c.id)
@@ -322,7 +329,6 @@ class AdminSelect(discord.ui.View):
     @discord.ui.button(label="🎉 Начать Конкурс", style=discord.ButtonStyle.secondary, row=2)
     async def b_sg(self, i, b): await i.response.send_modal(ContestCreateModal())
 
-    # 2. НАСТРОЙКА
     @discord.ui.button(label="🏪 Каналы Рынков", style=discord.ButtonStyle.gray, row=3)
     async def b_mk(self, i, b):
         cat = await i.guild.create_category("🛒 РЫНОК")
@@ -336,30 +342,24 @@ class AdminSelect(discord.ui.View):
 
     @discord.ui.button(label="🎫 Тикеты", style=discord.ButtonStyle.primary, row=3)
     async def b_t(self, i, b): 
-        c=await i.guild.create_category("📩 Support")
-        # Логи скрыты (админские права не меняем)
-        l=await i.guild.create_text_channel("ticket-logs", category=c); update_config(i.guild.id, "ticket_log_channel_id", l.id)
-        # Меню тикетов открыто для верифицированных
+        c=await i.guild.create_category("📩 Support"); l=await i.guild.create_text_channel("ticket-logs", category=c, overwrites=get_admin_perms(i.guild)); update_config(i.guild.id, "ticket_log_channel_id", l.id)
         update_config(i.guild.id, "ticket_category_id", c.id); ch=await i.guild.create_text_channel("tickets", category=c, overwrites=get_write_perms(i.guild)); await ch.send(embed=discord.Embed(title="Тикеты"), view=TicketStartView()); await i.response.send_message("✅", ephemeral=True)
 
     @discord.ui.button(label="🛠 Верификация", style=discord.ButtonStyle.green, row=4)
     async def b_v(self, i, b):
-        # 1. Мгновенный ответ
-        await i.response.send_message("⚙️ Настраиваю...", ephemeral=True)
+        # ИСПРАВЛЕННАЯ ВЕРИФИКАЦИЯ
+        await i.response.send_message("⚙️ Создаю...", ephemeral=True)
+        guild = i.guild
         try:
-            # 2. Создаем роль Verified (если нет)
-            r=await i.guild.create_role(name="Verified", color=discord.Color.green(), permissions=discord.Permissions(view_channel=True, read_messages=True, send_messages=True, connect=True, speak=True, stream=True)); update_config(i.guild.id, "verify_role_id", r.id)
-            
-            # 3. Канал входа (Только для новичков)
-            ow = get_newbie_perms(i.guild)
-            ch=await i.guild.create_text_channel("verify", overwrites=ow); await ch.send(embed=discord.Embed(title="Верификация", view=VerifyView())); 
-            
-            # 4. Изоляция @everyone
-            try: await i.guild.default_role.edit(permissions=discord.Permissions(read_messages=False, view_channel=False))
-            except: pass
-            
+            r = discord.utils.get(guild.roles, name="Verified")
+            if not r: r = await guild.create_role(name="Verified", color=discord.Color.green(), permissions=discord.Permissions(view_channel=True, read_messages=True, send_messages=True, connect=True, speak=True, stream=True))
+            update_config(guild.id, "verify_role_id", r.id)
+            ow = get_newbie_perms(guild)
+            ch=await guild.create_text_channel("verify", overwrites=ow); await ch.send(embed=discord.Embed(title="Верификация", view=VerifyView())); 
             await i.followup.send("✅ Верификация создана!")
-        except: await i.followup.send("❌ Ошибка")
+            try: await guild.default_role.edit(permissions=discord.Permissions(read_messages=False, view_channel=False))
+            except: await i.followup.send("⚠️ Скройте каналы для @everyone вручную.")
+        except Exception as e: await i.followup.send(f"❌ Ошибка: {e}")
 
 class ContestJoinView(discord.ui.View):
     def __init__(self): super().__init__(timeout=None)
@@ -436,41 +436,26 @@ async def top_ru(i: discord.Interaction):
     await slash_play(i, "Топ 100 русских песен 2024 микс")
 
 @tasks.loop(minutes=5)
-async def tasks_loop():
-    cursor.execute("SELECT guild_id, stats_category_id, social_yt_id, media_channel_id, last_video_id FROM configs")
+async def update_stats_loop():
+    cursor.execute("SELECT guild_id, stats_category_id FROM configs")
     for row in cursor.fetchall():
-        guild = bot.get_guild(row[0])
-        if not guild: continue
-
-        # 1. Stats
-        if row[1]:
-            try:
-                cat = guild.get_channel(row[1])
-                st_ft = (await asyncio.wait_for((await JavaServer.async_lookup(FUNTIME_IP)).async_status(), 2.0)).players.online
-                st_hw = (await asyncio.wait_for((await JavaServer.async_lookup(HOLYWORLD_IP)).async_status(), 2.0)).players.online
-                names = [f"💎 Souls Visuals", f"👥 Людей: {guild.member_count}", f"🧡 FT: {st_ft}", f"💙 HW: {st_hw}"]
-                for i, c in enumerate(cat.voice_channels):
-                    if i < 4: await c.edit(name=names[i])
-            except: pass
-
-        # 2. YouTube
-        if row[2] and row[3]:
-            try:
-                feed = feedparser.parse(f"https://www.youtube.com/feeds/videos.xml?channel_id={row[2]}")
-                if feed.entries:
-                    latest = feed.entries[0]
-                    if latest.yt_videoid != row[4]:
-                        ch = guild.get_channel(row[3])
-                        await ch.send(f"🎥 **Новое видео!**\n{latest.title}\n{latest.link}")
-                        cursor.execute("UPDATE configs SET last_video_id=? WHERE guild_id=?", (latest.yt_videoid, row[0]))
-                        conn.commit()
-            except: pass
+        try:
+            g = bot.get_guild(row[0]); cat = g.get_channel(row[1])
+            if not g or not cat: continue
+            try: st_ft = (await asyncio.wait_for((await JavaServer.async_lookup(FUNTIME_IP)).async_status(), 2.0)).players.online
+            except: st_ft = "Off"
+            try: st_hw = (await asyncio.wait_for((await JavaServer.async_lookup(HOLYWORLD_IP)).async_status(), 2.0)).players.online
+            except: st_hw = "Off"
+            names = [f"💎 Souls Visuals", f"👥 Людей: {g.member_count}", f"🧡 FT: {st_ft}", f"💙 HW: {st_hw}"]
+            for i, c in enumerate(cat.voice_channels):
+                if i < 4: await c.edit(name=names[i])
+        except: pass
 
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user}')
     await bot.tree.sync()
-    tasks_loop.start()
+    update_stats_loop.start()
     bot.add_view(VerifyView()); bot.add_view(TicketStartView()); bot.add_view(TicketControlView()); bot.add_view(AdminSelect()); bot.add_view(MarketSelectView()); bot.add_view(PrivateVoiceView()); bot.add_view(ContestJoinView())
 
 @bot.event
@@ -486,7 +471,6 @@ async def on_member_join(member):
     if c and c[8]: 
         ch=member.guild.get_channel(c[8])
         if ch: 
-            # ПРИВЕТСТВИЕ БЕЗ ФОТО
             embed = discord.Embed(title=f"Добро пожаловать, {member.name}!", description=f"Рады видеть тебя на сервере **{member.guild.name}**! 🎉\nНе забудь прочитать правила.", color=discord.Color.gold())
             embed.set_thumbnail(url=member.display_avatar.url)
             await ch.send(f"{member.mention}", embed=embed)
