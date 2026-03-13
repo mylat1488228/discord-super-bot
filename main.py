@@ -75,21 +75,24 @@ def update_config(guild_id, column, value):
     if cursor.fetchone() is None: cursor.execute("INSERT INTO configs (guild_id) VALUES (?)", (guild_id,))
     cursor.execute(f"UPDATE configs SET {column} = ? WHERE guild_id = ?", (value, guild_id)); conn.commit()
 
-# --- СИСТЕМА ПРАВ (ИСПРАВЛЕННАЯ) ---
-
-# 1. Права для канала ВЕРИФИКАЦИИ (То, чего не хватало)
-def get_newbie_perms(guild):
+# --- ПРАВА ---
+def get_admin_perms(guild):
     return {
-        guild.default_role: discord.PermissionOverwrite(
-            view_channel=True, 
-            read_messages=True, 
-            read_message_history=True, # Важно для кнопок
-            send_messages=False
-        ),
-        guild.me: discord.PermissionOverwrite(view_channel=True, read_messages=True, send_messages=True)
+        guild.default_role: discord.PermissionOverwrite(read_messages=False, view_channel=False),
+        guild.me: discord.PermissionOverwrite(read_messages=True, view_channel=True)
     }
 
-# 2. Каналы, где можно ПИСАТЬ (New Players, Chat, etc.)
+def get_public_perms(guild):
+    return {
+        guild.default_role: discord.PermissionOverwrite(
+            view_channel=True,
+            read_messages=True,
+            read_message_history=True,
+            send_messages=False
+        ),
+        guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, view_channel=True)
+    }
+
 def get_write_perms(guild):
     c = get_config(guild.id)
     verified = guild.get_role(c[1]) if c and c[1] else None
@@ -102,13 +105,12 @@ def get_write_perms(guild):
         overwrites[verified] = discord.PermissionOverwrite(
             view_channel=True, 
             read_messages=True, 
-            send_messages=True, 
+            send_messages=True,
             read_message_history=True,
             attach_files=True
         )
     return overwrites
 
-# 3. Каналы ТОЛЬКО ДЛЯ ЧТЕНИЯ (Rules, News)
 def get_read_only_perms(guild):
     c = get_config(guild.id)
     verified = guild.get_role(c[1]) if c and c[1] else None
@@ -121,13 +123,12 @@ def get_read_only_perms(guild):
         overwrites[verified] = discord.PermissionOverwrite(
             view_channel=True, 
             read_messages=True, 
-            send_messages=False, 
+            send_messages=False,
             read_message_history=True,
             add_reactions=True
         )
     return overwrites
 
-# 4. Голосовые каналы
 def get_voice_perms(guild):
     c = get_config(guild.id)
     verified = guild.get_role(c[1]) if c and c[1] else None
@@ -145,11 +146,10 @@ def get_voice_perms(guild):
         )
     return overwrites
 
-# 5. Админские (Логи)
-def get_admin_perms(guild):
+def get_newbie_perms(guild):
     return {
-        guild.default_role: discord.PermissionOverwrite(view_channel=False),
-        guild.me: discord.PermissionOverwrite(view_channel=True, read_messages=True)
+        guild.default_role: discord.PermissionOverwrite(view_channel=True, read_messages=True, read_message_history=True, send_messages=False),
+        guild.me: discord.PermissionOverwrite(view_channel=True, read_messages=True, send_messages=True)
     }
 
 # --- ЛОГЕР ---
@@ -225,7 +225,7 @@ class PrivateVoiceCreateModal(discord.ui.Modal, title='Создать комна
             if not cat: return await i.response.send_message("❌ Категория удалена. Перенастройте бота.", ephemeral=True)
             try: lim = int(self.v_limit.value) if self.v_limit.value else 0
             except: lim = 0
-            ow = {i.guild.default_role: discord.PermissionOverwrite(connect=False, view_channel=True), i.user: discord.PermissionOverwrite(connect=True, view_channel=True, manage_channels=True, move_members=True), i.guild.me: discord.PermissionOverwrite(connect=True, view_channel=True, manage_channels=True, move_members=True)}
+            ow = {i.guild.default_role: discord.PermissionOverwrite(connect=False, view_channel=True), i.user: discord.PermissionOverwrite(connect=True, view_channel=True, manage_channels=True, move_members=True)}
             vc = await i.guild.create_voice_channel(name=self.v_name.value, category=cat, user_limit=lim, overwrites=ow)
             cursor.execute("INSERT INTO voice_channels (voice_id, owner_id) VALUES (?, ?)", (vc.id, i.user.id)); conn.commit()
             if i.user.voice: await i.user.move_to(vc)
@@ -244,7 +244,7 @@ class VerifyModal(discord.ui.Modal, title='Верификация'):
     async def on_submit(self, i):
         if self.code_input.value == self.generated_code:
             try: await i.user.add_roles(i.guild.get_role(self.role_id)); await i.response.send_message("✅ Успех!", ephemeral=True)
-            except: await i.response.send_message("❌ Ошибка прав. Поднимите роль бота выше роли Verified.", ephemeral=True)
+            except: await i.response.send_message("❌ Ошибка прав", ephemeral=True)
         else: await i.response.send_message("❌ Неверно", ephemeral=True)
 
 class VerifyView(discord.ui.View):
@@ -355,18 +355,11 @@ class AdminSelect(discord.ui.View):
 
     @discord.ui.button(label="🛠 Верификация", style=discord.ButtonStyle.green, row=4)
     async def b_v(self, i, b):
-        await i.response.send_message("⚙️ Создаю...", ephemeral=True)
-        guild = i.guild
-        try:
-            r = discord.utils.get(guild.roles, name="Verified")
-            if not r: r = await guild.create_role(name="Verified", color=discord.Color.green(), permissions=discord.Permissions(view_channel=True, read_messages=True, send_messages=True, connect=True, speak=True, stream=True))
-            update_config(guild.id, "verify_role_id", r.id)
-            ow = get_newbie_perms(guild)
-            ch=await guild.create_text_channel("verify", overwrites=ow); await ch.send(embed=discord.Embed(title="Верификация", view=VerifyView())); 
-            await i.followup.send("✅ Верификация создана!")
-            try: await guild.default_role.edit(permissions=discord.Permissions(read_messages=False, view_channel=False))
-            except: await i.followup.send("⚠️ Скройте каналы для @everyone вручную.")
-        except Exception as e: await i.followup.send(f"❌ Ошибка: {e}")
+        r=await i.guild.create_role(name="Verified", color=discord.Color.green(), permissions=discord.Permissions(view_channel=True, read_messages=True, send_messages=True, connect=True, speak=True, stream=True)); update_config(i.guild.id, "verify_role_id", r.id)
+        ow={i.guild.default_role:discord.PermissionOverwrite(read_messages=True, send_messages=False, read_message_history=True), r:discord.PermissionOverwrite(read_messages=False), i.guild.me:discord.PermissionOverwrite(read_messages=True)}
+        ch=await i.guild.create_text_channel("verify", overwrites=ow); await ch.send(embed=discord.Embed(title="Верификация", color=discord.Color.green()), view=VerifyView()); await i.response.send_message("✅", ephemeral=True)
+        try: await i.guild.default_role.edit(permissions=discord.Permissions(read_messages=False, view_channel=False))
+        except: pass
 
 class ContestJoinView(discord.ui.View):
     def __init__(self): super().__init__(timeout=None)
@@ -499,10 +492,7 @@ async def on_member_join(member):
 
 @bot.event
 async def on_member_remove(member):
-    c=get_config(member.guild.id)
-    if c and c[9]: 
-        ch=member.guild.get_channel(c[9])
-        if ch: await ch.send(f"Пока, {member.name}...", delete_after=10)
+    pass # Прощания отключены
 
 @bot.command()
 async def setup(ctx):
@@ -528,9 +518,5 @@ async def admin(ctx):
 @bot.command()
 async def set_welcome(ctx):
     if ctx.author.guild_permissions.administrator: update_config(ctx.guild.id, "welcome_channel_id", ctx.channel.id); await ctx.send("✅")
-
-@bot.command()
-async def set_leave(ctx):
-    if ctx.author.guild_permissions.administrator: update_config(ctx.guild.id, "leave_channel_id", ctx.channel.id); await ctx.send("✅")
 
 bot.run(TOKEN)
